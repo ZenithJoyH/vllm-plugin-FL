@@ -65,12 +65,12 @@ class FusedMoEFL(FusedMoE):
     """
 
     def __init__(self, *args, **kwargs):
-        routed_scaling_factor = kwargs.pop("routed_scaling_factor", 1.0)
-        shared_experts = kwargs.pop("shared_experts", None)
-        gate = kwargs.pop("gate", None)
-        routed_input_transform = kwargs.pop("routed_input_transform", None)
-        routed_output_transform = kwargs.pop("routed_output_transform", None)
-        apply_routed_scale_to_output = kwargs.pop("apply_routed_scale_to_output", False)
+        routed_scaling_factor = kwargs.get("routed_scaling_factor", 1.0)
+        shared_experts = kwargs.get("shared_experts", None)
+        gate = kwargs.get("gate", None)
+        routed_input_transform = kwargs.get("routed_input_transform", None)
+        routed_output_transform = kwargs.get("routed_output_transform", None)
+        apply_routed_scale_to_output = kwargs.get("apply_routed_scale_to_output", False)
         super().__init__(*args, **kwargs)
         self._routed_scaling_factor = routed_scaling_factor
         self._apply_routed_scale_to_output = apply_routed_scale_to_output
