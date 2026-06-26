@@ -55,6 +55,23 @@ In theory, vllm-plugin-FL can support all models available in vLLM, as long as n
     # or editble install
     pip install --no-build-isolation -e .
     ```
+ 
+    For CUDA-like devices, including CUDA and HIP/ROCm environments that use
+    PyTorch's CUDA dispatch key, build the plugin native extension by setting
+    `VLLM_VENDOR=cuda` during installation:
+    ```sh
+    cd vllm-plugin-FL
+    VLLM_VENDOR=cuda pip install --no-build-isolation .
+    # or editable install
+    VLLM_VENDOR=cuda pip install --no-build-isolation -e .
+    ```
+
+    This builds and installs `vllm_fl._C`, which provides native C++ support
+    required by some graph/custom-op paths, especially when vLLM is installed
+    with `VLLM_TARGET_DEVICE=empty`.
+
+    If `VLLM_VENDOR` is not set, vllm-plugin-FL is installed as a Python-only
+    plugin and the native extension is skipped.
 
 3. Install [FlagGems](https://flagos-ai.github.io/FlagGems/getting-started/install/)
 
