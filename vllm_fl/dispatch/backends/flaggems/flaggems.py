@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Optional, Union
 
 import torch
+import os
 
 from vllm_fl.dispatch.backends.base import Backend
 
@@ -144,8 +145,6 @@ class FlagGemsBackend(Backend):
         Returns:
             Fully qualified class path string
         """
-        import os
-
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
         # TritonAttentionBackend requires CUDA, check if available
@@ -174,6 +173,7 @@ class FlagGemsBackend(Backend):
                 use_flaggems_attn = True
 
         if use_flaggems_attn:
+            print("Using FlagGems attention backend.")
             return "vllm_fl.dispatch.backends.flaggems.impl.attention.AttentionFLBackend"
 
         return AttentionBackendEnum.TRITON_ATTN.get_path()
