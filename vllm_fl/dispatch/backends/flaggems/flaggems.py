@@ -144,6 +144,8 @@ class FlagGemsBackend(Backend):
         Returns:
             Fully qualified class path string
         """
+        import os
+
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
         # TritonAttentionBackend requires CUDA, check if available
@@ -158,7 +160,13 @@ class FlagGemsBackend(Backend):
 
         if use_sparse:
             raise ValueError("use_sparse=True requires use_mla=True.")
-        # TODO: return "vllm_fl.dispatch.backends.flaggems.impl.attention.AttentionFLBackend"
+
+        use_flaggems_attn = os.environ.get(
+            "VLLM_FL_USE_FLAGGEMS_ATTN", "0"
+        ).lower() in ("1", "true", "yes")
+
+        if use_flaggems_attn:
+            return "vllm_fl.dispatch.backends.flaggems.impl.attention.AttentionFLBackend"
 
         return AttentionBackendEnum.TRITON_ATTN.get_path()
 
