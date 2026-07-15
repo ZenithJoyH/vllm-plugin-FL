@@ -165,6 +165,14 @@ class FlagGemsBackend(Backend):
             "VLLM_FL_USE_FLAGGEMS_ATTN", "0"
         ).lower() in ("1", "true", "yes")
 
+        # Auto-enable FlagGems attention for NVIDIA or PPU (thead) devices
+        if not use_flaggems_attn:
+            from vllm.platforms import current_platform
+
+            device_name = getattr(current_platform, "device_name", None)
+            if device_name in ("nvidia", "thead"):
+                use_flaggems_attn = True
+
         if use_flaggems_attn:
             return "vllm_fl.dispatch.backends.flaggems.impl.attention.AttentionFLBackend"
 
