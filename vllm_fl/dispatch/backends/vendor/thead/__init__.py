@@ -1,7 +1,7 @@
 # Copyright (c) 2026 BAAI. All rights reserved.
 
 """
-Thead (平头哥/PPU) backend for vllm-plugin-FL dispatch.
+Thead backend for vllm-plugin-FL dispatch.
 
 This backend provides operator implementations for T-Head PPU accelerators.
 """

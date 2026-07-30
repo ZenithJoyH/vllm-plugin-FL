@@ -29,7 +29,6 @@ import torch
 # Step 1 — load the flash_attn_3 wheel
 # ---------------------------------------------------------------------------
 import flash_attn_3._C  # noqa: F401 — registers torch.ops.flash_attn_3
-print("DEBUG [thead/attention.py]: flash_attn_3._C imported OK", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -107,14 +106,6 @@ def _thead_flash_attn_varlen_func(
     if cu_seqlens_k is None:
         max_seqlen_k = 1
 
-    print(
-        "DEBUG [thead/attention.py] _thead_flash_attn_varlen_func: calling "
-        f"torch.ops.flash_attn_3.fwd (fa_version=3, "
-        f"cu_seqlens_k={'None' if cu_seqlens_k is None else 'set'}, "
-        f"max_seqlen_k={max_seqlen_k}, "
-        f"num_splits={num_splits})",
-        flush=True,
-    )
 
     out, softmax_lse, _, _ = torch.ops.flash_attn_3.fwd(
         q, k, v,
@@ -282,11 +273,6 @@ class TheadFlashAttentionImpl(FlashAttentionImpl):
         # Override FA version to 3 — our custom flash_attn_varlen_func
         # handles the wheel call correctly.
         self.vllm_flash_attn_version = 3
-        print(
-            "DEBUG [thead/attention.py] TheadFlashAttentionImpl: "
-            f"overrode fa_version to {self.vllm_flash_attn_version}",
-            flush=True,
-        )
 
 
 class TheadFlashAttentionBackend(FlashAttentionBackend):

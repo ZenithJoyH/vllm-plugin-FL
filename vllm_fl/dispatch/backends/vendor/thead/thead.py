@@ -1,7 +1,7 @@
 # Copyright (c) 2026 BAAI. All rights reserved.
 
 """
-Thead (平头哥/PPU) backend implementation.
+Thead backend implementation.
 
 This backend provides operator implementations for T-Head PPU accelerators.
 For attention, it uses the flash_attn_3 wheel (FA3) for better performance
