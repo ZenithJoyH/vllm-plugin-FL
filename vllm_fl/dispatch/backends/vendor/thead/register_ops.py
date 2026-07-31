@@ -28,12 +28,18 @@ def register_builtins(registry) -> None:
     """
     Register all thead (PPU) VENDOR operator implementations.
 
-    At registration time we also load the flash_attn_3 wheel so that
-    TheadFlashAttentionBackend can call FA3 ops.
+    At registration time we also:
+    - Import impl.attention to load the flash_attn_3 wheel for FA3
+    - Import impl.mla to patch flashmla ops for the flash_mla wheel
 
     Args:
         registry: Registry to register into
     """
+    # Load thead-specific patches (FA3, FlashMLA) at registration time
+    # so they apply in every worker subprocess.
+    from .impl import attention  # noqa: F401 — FA3 wheel + reshape_and_cache
+    from .impl import mla  # noqa: F401 — flash_mla wheel patches
+
     from .thead import TheadBackend
 
     backend = TheadBackend()

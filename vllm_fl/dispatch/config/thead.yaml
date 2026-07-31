@@ -30,7 +30,6 @@ op_backends:
   attention_backend:
     - flagos
     - vendor
-    - reference
   rms_norm:
     - flagos
     - vendor
@@ -46,4 +45,3 @@ op_backends:
 
 # FlagOS operator blacklist
 flagos_blacklist:
-
