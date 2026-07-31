@@ -29,6 +29,7 @@ import torch
 # Step 1 — load the flash_attn_3 wheel
 # ---------------------------------------------------------------------------
 import flash_attn_3._C  # noqa: F401 — registers torch.ops.flash_attn_3
+print("DEBUG [thead/attention.py]: flash_attn_3._C imported OK", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +107,14 @@ def _thead_flash_attn_varlen_func(
     if cu_seqlens_k is None:
         max_seqlen_k = 1
 
+    print(
+        "DEBUG [thead/attention.py] _thead_flash_attn_varlen_func: calling "
+        f"torch.ops.flash_attn_3.fwd (fa_version=3, "
+        f"cu_seqlens_k={'None' if cu_seqlens_k is None else 'set'}, "
+        f"max_seqlen_k={max_seqlen_k}, "
+        f"num_splits={num_splits})",
+        flush=True,
+    )
 
     out, softmax_lse, _, _ = torch.ops.flash_attn_3.fwd(
         q, k, v,
@@ -153,10 +162,33 @@ _flash_attn_mod.flash_attn_varlen_func = _thead_flash_attn_varlen_func
 _flash_attn_mod.get_scheduler_metadata = _vfa.get_scheduler_metadata
 
 # ---------------------------------------------------------------------------
-# Step 2c — pure-PyTorch reshape_and_cache_flash for PPU
+# Step 2c — fallback reshape_and_cache_flash for PPU
 # ---------------------------------------------------------------------------
-# The original is a CUDA custom op from _C.abi3.so which is not available
-# on the remote.  We provide a pure-PyTorch indexed-copy version.
+# Try loading the native CUDA op from _C.abi3.so first.  If it is not
+# available (the .so was not compiled for PPU or was neither SCP'd nor
+# pre-installed) we fall back to a pure-PyTorch implementation.
+
+_reshape_and_cache_cuda_available = False
+try:
+    # Probe whether the CUDA op is actually callable
+    _test_k = torch.empty(1, 1, 1, device="cuda")
+    _test_v = torch.empty(1, 1, 1, device="cuda")
+    _test_kc = torch.empty(1, 1, 1, 1, device="cuda")
+    _test_vc = torch.empty(1, 1, 1, 1, device="cuda")
+    _test_sm = torch.zeros(1, dtype=torch.int64, device="cuda")
+    _test_ks = torch.ones(1, device="cuda")
+    _test_vs = torch.ones(1, device="cuda")
+    torch.ops._C_cache_ops.reshape_and_cache_flash(
+        _test_k, _test_v, _test_kc, _test_vc, _test_sm,
+        "auto", _test_ks, _test_vs,
+    )
+    _reshape_and_cache_cuda_available = True
+    del _test_k, _test_v, _test_kc, _test_vc, _test_sm, _test_ks, _test_vs
+    print("DEBUG [thead/attention.py]: using CUDA _C_cache_ops.reshape_and_cache_flash",
+          flush=True)
+except Exception:
+    print("DEBUG [thead/attention.py]: CUDA reshape_and_cache_flash unavailable, "
+          "using pure-PyTorch fallback", flush=True)
 
 
 def reshape_and_cache_flash_thead(
@@ -171,39 +203,32 @@ def reshape_and_cache_flash_thead(
 ) -> None:
     """GPU-only KV cache write for PPU, compatible with CUDA graph capture.
 
-    The original CUDA custom op (``_C_cache_ops.reshape_and_cache_flash``)
-    is not available on the remote.  This pure-PyTorch equivalent avoids
-    *any* CPU-GPU synchronisation or data-dependent shape changes so that
-    it can run inside a CUDA graph capture region.
-
-    Padding tokens (``slot_mapping == -1``) are handled by zeroing their
-    key/value before writing to a safe slot, rather than skipping them with
-    a conditional — the latter would require a CPU sync (``.any()``) and
-    produce a data-dependent tensor shape.
+    Tries the native CUDA custom op first; falls back to pure-PyTorch
+    indexed-copy if the .so is not available on this platform.
     """
+    if _reshape_and_cache_cuda_available:
+        torch.ops._C_cache_ops.reshape_and_cache_flash(
+            key, value, key_cache, value_cache,
+            slot_mapping, kv_cache_dtype, k_scale, v_scale,
+        )
+        return
+
+    # ---- pure-PyTorch fallback ----
     del kv_cache_dtype, k_scale, v_scale  # unused in pure-torch path
 
     num_kv_heads = key.shape[1]
     head_size = key.shape[2]
 
-    # Zero out key/value for padding slots (slot_mapping == -1), then map
-    # -1 to slot 0 so that every token writes somewhere.  Writing zeros to
-    # slot 0 for padding tokens is harmless.
     valid_mask_gpu = (slot_mapping >= 0).to(key.dtype).view(-1, 1, 1)
     masked_key = key * valid_mask_gpu
     masked_value = value * valid_mask_gpu
 
-    safe_slots = slot_mapping.clamp(min=0)  # -1 -> 0
+    safe_slots = slot_mapping.clamp(min=0)
 
-    # Convert flat slot indices to (block, token_within_block) coordinates.
-    # key_cache shape: [num_blocks, block_size, num_kv_heads, head_size]
     block_size = key_cache.shape[1]
     block_indices = safe_slots // block_size
     token_in_block = safe_slots % block_size
 
-    # Write each kv_head separately — this avoids flattening the entire
-    # cache into a 2D tensor, which would create a ~2.5 GiB temporary
-    # copy on non-contiguous cache layouts (e.g. HND stride order).
     for h in range(num_kv_heads):
         key_cache[block_indices, token_in_block, h, :] = masked_key[:, h, :]
         value_cache[block_indices, token_in_block, h, :] = masked_value[:, h, :]
@@ -273,6 +298,11 @@ class TheadFlashAttentionImpl(FlashAttentionImpl):
         # Override FA version to 3 — our custom flash_attn_varlen_func
         # handles the wheel call correctly.
         self.vllm_flash_attn_version = 3
+        print(
+            "DEBUG [thead/attention.py] TheadFlashAttentionImpl: "
+            f"overrode fa_version to {self.vllm_flash_attn_version}",
+            flush=True,
+        )
 
 
 class TheadFlashAttentionBackend(FlashAttentionBackend):

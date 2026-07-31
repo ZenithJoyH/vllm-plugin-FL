@@ -1,7 +1,7 @@
 # Copyright (c) 2026 BAAI. All rights reserved.
 
 """
-Thead backend implementation.
+Thead PPU backend implementation.
 
 This backend provides operator implementations for T-Head PPU accelerators.
 For attention, it uses the flash_attn_3 wheel (FA3) for better performance
@@ -102,7 +102,16 @@ class TheadBackend(Backend):
         """
         Get the attention backend class path for PPU.
 
-        Returns the TheadFlashAttentionBackend which uses the FA3 wheel.
+        - MLA (Multi-head Latent Attention): uses FlashMLABackend
+          (flash_mla wheel, patched at vendor load time to support CC 8.0)
+        - MLA + Sparse: uses FlashMLASparseBackend
+        - Standard attention: uses TheadFlashAttentionBackend (FA3 wheel)
+
+        The vendor/thead/impl/mla module patches the flashmla ops layer at
+        import time: it imports the flash_mla wheel, aliases
+        torch.ops._flashmla_C -> torch.ops.flash_mla, replaces stub
+        functions with real implementations, and patches the backend CC
+        checks to allow PPU CC 8.0.
 
         Args:
             use_mla: Whether to use Multi-head Latent Attention (MLA)
@@ -111,10 +120,12 @@ class TheadBackend(Backend):
         Returns:
             Fully qualified class path string
         """
-        if use_mla or use_sparse:
-            # Fall back to standard FLASH_ATTN for MLA/sparse
-            from vllm.v1.attention.backends.registry import AttentionBackendEnum
-            return AttentionBackendEnum.FLASH_ATTN.get_path()
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        if use_mla:
+            if use_sparse:
+                return AttentionBackendEnum.FLASHMLA_SPARSE.get_path()
+            return AttentionBackendEnum.FLASHMLA.get_path()
 
         return (
             "vllm_fl.dispatch.backends.vendor.thead.impl.attention."
