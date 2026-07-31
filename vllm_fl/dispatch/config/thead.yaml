@@ -46,42 +46,4 @@ op_backends:
 
 # FlagOS operator blacklist
 flagos_blacklist:
-  # - to_copy
-  # - _to_copy
-  # - zeros
-  # - copy_
-  # - fill_scalar_
-  # - sum_dim
-  # - exponential_
-  # - mm
-  # - resolve_neg
-  # - resolve_conj
-  # - eq_scalar
-  # - floor_divide
-  # - cumsum
-  # - mul
-  # - reciprocal
-  # - repeat
-  # - randn
-  # - add
-  # - ge_scalar
-  # - sub
-  # - bitwise_and
-  # - bitwise_not
-  # - slice_scatter
-  # - fill_tensor_
-  # - conv1d
-  # - conv2d
-  # - uniform_
-  # - prod
-  # - max
-  # - amax
-  # - cat
-  # - stack
-  # - flatten
-  # - reshape
-  # - view
-  # - tensor
 
-# OOT (Out-of-Tree) operator blacklist
-# oot_blacklist: []
