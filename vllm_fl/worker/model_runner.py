@@ -1165,7 +1165,7 @@ class ModelRunnerFL(
 
     # Note: used for model runner override.
     def _init_device_properties(self) -> None:
-        """Initialize attributes from current_platform.torch_device_fn.get_device_properties"""
+        """Initialize attributes from torch.cuda.get_device_properties"""
 
         self.num_sms = num_compute_units(self.device.index)
 
@@ -1173,10 +1173,10 @@ class ModelRunnerFL(
     def _sync_device(self) -> None:
         _accelerator_synchronize()
 
-    def _get_or_create_async_output_copy_stream(self) -> current_platform.torch_device_fn.Stream:
+    def _get_or_create_async_output_copy_stream(self) -> torch.cuda.Stream:
         stream = self.async_output_copy_stream
         if stream is None:
-            stream = current_platform.torch_device_fn.Stream()
+            stream = torch.cuda.Stream()
             self.async_output_copy_stream = stream
         return stream
 
