@@ -44,5 +44,5 @@ def rotary_embedding_flaggems(
         sin,
         position_ids=position_ids,
         rotary_interleaved=rotary_interleaved,
-        inplace=inplace,
+        inplace=False,
     )
