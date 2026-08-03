@@ -17,6 +17,10 @@ from .mla import (
     MLAFLBackend,
     MLAFLImpl,
 )
+from .mla_sparse import (
+    MLASparseFLBackend,
+    MLASparseFLImpl,
+)
 from .custom_attention import register_attention
 
 __all__ = [
@@ -30,5 +34,7 @@ __all__ = [
     "AttentionFLImpl",
     "MLAFLBackend",
     "MLAFLImpl",
+    "MLASparseFLBackend",
+    "MLASparseFLImpl",
     "register_attention",
 ]
