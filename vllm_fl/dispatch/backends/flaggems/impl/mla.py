@@ -27,7 +27,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.platforms import current_platform
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 
-from flag_gems import flash_attn_varlen_func, flash_mla, concat_and_cache_mla as flag_gems_concat_and_cache_mla, gather_and_maybe_dequant_cache as flag_gems_gather_and_maybe_dequant_cache
+from flag_gems import flash_attn_varlen_func, flash_mla, concat_and_cache_mla as flag_gems_concat_and_cache_mla
 
 logger = init_logger(__name__)
 
@@ -162,6 +162,7 @@ class MLAFLImpl(MLACommonImpl[MLACommonMetadata]):
             # ---- Gather KV cache into workspace ----
             if not use_fp8_prefill:
                 if getattr(current_platform, "vendor_name", "") == "thead":
+                    from flag_gems import gather_and_maybe_dequant_cache as flag_gems_gather_and_maybe_dequant_cache
                     # T-Head backend: use FlagGems gather_and_maybe_dequant_cache
                     flag_gems_gather_and_maybe_dequant_cache(
                         src_cache=kv_c_and_k_pe_cache,
