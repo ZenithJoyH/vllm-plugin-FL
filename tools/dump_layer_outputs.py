@@ -197,6 +197,11 @@ class HookManager:
             for idx, layer in enumerate(layer_list):
                 if layer is None:
                     continue
+                # Skip PPMissingLayer placeholders in pipeline parallel models
+                if type(layer).__name__ in ("PPMissingLayer", "StageMissingLayer"):
+                    continue
+                if isinstance(layer, nn.Identity):
+                    continue
                 if self.target_layers is not None and idx not in self.target_layers:
                     continue
 
@@ -280,39 +285,67 @@ class HookManager:
             h.remove()
         self.handles.clear()
 
-    def save(self, output_dir: Path, backend: str) -> dict:
-        """Save captured tensors to disk and return manifest entries."""
+    def save(self, output_dir: Path, backend: str, tp_size: int, pp_size: int) -> dict:
+        """Save captured tensors to disk and return manifest entries.
+
+        Args:
+            output_dir: Root output directory
+            backend: Backend identifier (cuda, flaggems, etc.)
+            tp_size: Tensor parallel size
+            pp_size: Pipeline parallel size
+
+        Note: self.captured should be in the new format:
+            {layer_name: [{tp_rank, pp_rank, tensors}, ...]}
+        """
         steps_manifest = {}
 
-        for key_prefix, tensors in sorted(self.captured.items()):
-            parts = key_prefix.split("/", 1)
+        for layer_name, rank_data_list in sorted(self.captured.items()):
+            parts = layer_name.split("/", 1)
             step_name = parts[0]
             layer_path = parts[1] if len(parts) > 1 else ""
-
-            dir_path = output_dir / backend / step_name / layer_path
-            dir_path.mkdir(parents=True, exist_ok=True)
 
             if step_name not in steps_manifest:
                 steps_manifest[step_name] = {}
 
-            layer_manifest = {}
-            for tensor_name, tensor in tensors.items():
-                file_name = f"{tensor_name}.pt"
+            # Save each rank's data to a separate file
+            for rank_data in rank_data_list:
+                tp_rank = rank_data["tp_rank"]
+                pp_rank = rank_data["pp_rank"]
+                tensors = rank_data["tensors"]
+
+                # File naming: layer_path.pp{pp_rank}.tp{tp_rank}.pt
+                if layer_path:
+                    base_name = layer_path.replace("/", "_")
+                else:
+                    base_name = "root"
+
+                file_name = f"{base_name}.pp{pp_rank}.tp{tp_rank}.pt"
+                dir_path = output_dir / backend / step_name
+                dir_path.mkdir(parents=True, exist_ok=True)
+
                 file_path = dir_path / file_name
-                torch.save(tensor, file_path)
 
-                rel_path = str(
-                    Path(backend) / step_name / layer_path / file_name
-                )
-                layer_manifest[tensor_name] = rel_path
+                # Save tensor data with rank info
+                torch.save({
+                    "tp_rank": tp_rank,
+                    "pp_rank": pp_rank,
+                    "tensors": tensors,
+                }, file_path)
 
-            # Nest into steps_manifest
-            if layer_path:
+                # Build relative path for manifest
+                rel_path = str(Path(backend) / step_name / file_name)
+
+                # Add to manifest
                 if "layers" not in steps_manifest[step_name]:
                     steps_manifest[step_name]["layers"] = {}
-                steps_manifest[step_name]["layers"][layer_path] = layer_manifest
-            else:
-                steps_manifest[step_name].update(layer_manifest)
+                if layer_path not in steps_manifest[step_name]["layers"]:
+                    steps_manifest[step_name]["layers"][layer_path] = []
+
+                steps_manifest[step_name]["layers"][layer_path].append({
+                    "tp_rank": tp_rank,
+                    "pp_rank": pp_rank,
+                    "file": rel_path
+                })
 
         return steps_manifest
 
@@ -328,41 +361,118 @@ def register_hooks_on_model(llm, hook_manager: HookManager):
     target_layers = hook_manager.target_layers
 
     def _register(model: torch.nn.Module):
+        # Query this worker's TP and PP rank
+        from vllm.distributed.parallel_state import (
+            get_pp_group,
+            get_tensor_model_parallel_rank,
+        )
+
+        tp_rank = get_tensor_model_parallel_rank()
+        pp_group = get_pp_group()
+        pp_rank = pp_group.rank_in_group if pp_group is not None else 0
+
         mgr = HookManager(dump_mode=dump_mode, layers=target_layers)
         mgr.register_hooks(model)
+        mgr.tp_rank = tp_rank
+        mgr.pp_rank = pp_rank
         model._dump_hook_manager = mgr  # noqa: SLF001
 
     llm.apply_model(_register)
 
 
-def retrieve_captured_data(llm) -> Dict[str, Dict[str, torch.Tensor]]:
-    """Retrieve captured tensor data from the worker process."""
+def retrieve_captured_data(llm) -> Dict[str, List[Dict]]:
+    """Retrieve captured tensor data from all workers.
+
+    Returns:
+        Dict mapping layer names to lists of rank data:
+        {
+            "step/layer_name": [
+                {"tp_rank": 0, "pp_rank": 0, "tensors": {"input": ..., "output": ...}},
+                {"tp_rank": 1, "pp_rank": 0, "tensors": {"input": ..., "output": ...}},
+                ...
+            ]
+        }
+    """
 
     def _retrieve(model: torch.nn.Module):
         mgr = getattr(model, "_dump_hook_manager", None)
         if mgr is None:
-            return {}
-        return dict(mgr.captured)
+            return {"tp_rank": -1, "pp_rank": -1, "captured": {}}
+
+        return {
+            "tp_rank": mgr.tp_rank,
+            "pp_rank": mgr.pp_rank,
+            "captured": dict(mgr.captured)  # {layer_name: {"tensor_name": tensor, ...}}
+        }
 
     results = llm.apply_model(_retrieve)
-    if results:
-        return results[0]
-    return {}
+
+    # Reorganize: {layer_name: [{tp_rank, pp_rank, tensors}, ...]}
+    merged = {}
+    for r in results:
+        if r["tp_rank"] == -1:  # Skip invalid workers
+            continue
+
+        for layer_name, tensors in r["captured"].items():
+            if layer_name not in merged:
+                merged[layer_name] = []
+
+            merged[layer_name].append({
+                "tp_rank": r["tp_rank"],
+                "pp_rank": r["pp_rank"],
+                "tensors": tensors
+            })
+
+    # Sort by (pp_rank, tp_rank) for consistent ordering
+    for layer_name in merged:
+        merged[layer_name].sort(key=lambda x: (x["pp_rank"], x["tp_rank"]))
+
+    return merged
 
 
-def retrieve_model_info(llm) -> Dict[str, str]:
-    """Retrieve detected model structure info from the worker process."""
+def retrieve_model_info(llm) -> Dict[str, List[Dict]]:
+    """Retrieve detected model structure info from all workers.
+
+    Returns:
+        Dict mapping info keys to lists of rank data:
+        {
+            "info_key": [
+                {"tp_rank": 0, "pp_rank": 0, "value": "..."},
+                {"tp_rank": 1, "pp_rank": 0, "value": "..."},
+                ...
+            ]
+        }
+    """
 
     def _retrieve(model: torch.nn.Module):
         mgr = getattr(model, "_dump_hook_manager", None)
         if mgr is None:
-            return {}
-        return dict(mgr._model_info)
+            return {"tp_rank": -1, "pp_rank": -1, "info": {}}
+
+        return {
+            "tp_rank": mgr.tp_rank,
+            "pp_rank": mgr.pp_rank,
+            "info": dict(mgr._model_info)
+        }
 
     results = llm.apply_model(_retrieve)
-    if results:
-        return results[0]
-    return {}
+
+    # Reorganize: {info_key: [{tp_rank, pp_rank, value}, ...]}
+    merged = {}
+    for r in results:
+        if r["tp_rank"] == -1:
+            continue
+
+        for key, value in r["info"].items():
+            if key not in merged:
+                merged[key] = []
+            merged[key].append({
+                "tp_rank": r["tp_rank"],
+                "pp_rank": r["pp_rank"],
+                "value": value
+            })
+
+    return merged
 
 
 def cleanup_hooks_on_model(llm):
@@ -432,6 +542,9 @@ def main():
         "--tp-size", type=int, default=1, help="Tensor parallel size"
     )
     parser.add_argument(
+        "--pp-size", type=int, default=1, help="Pipeline parallel size"
+    )
+    parser.add_argument(
         "--dtype", default="auto", help="Model dtype (auto, float16, bfloat16)"
     )
     parser.add_argument(
@@ -462,6 +575,7 @@ def main():
         enable_chunked_prefill=False,
         seed=args.seed,
         tensor_parallel_size=args.tp_size,
+        pipeline_parallel_size=args.pp_size,
         dtype=args.dtype,
         trust_remote_code=args.trust_remote_code,
     )
@@ -488,13 +602,22 @@ def main():
     captured_data = retrieve_captured_data(llm)
     model_info = retrieve_model_info(llm)
     hook_manager.captured = captured_data
-    print(f"\nRetrieved {len(captured_data)} layer/step combinations from worker")
+
+    # Count total tensors across all ranks
+    total_rank_data = sum(len(rank_list) for rank_list in captured_data.values())
+    print(f"\nRetrieved {len(captured_data)} layer/step combinations from {total_rank_data} rank instances")
 
     # Save tensors
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    steps_manifest = hook_manager.save(output_dir, args.backend)
+    steps_manifest = hook_manager.save(output_dir, args.backend, args.tp_size, args.pp_size)
+
+    # Flatten model_info for manifest (take first rank's values)
+    model_info_flat = {}
+    for key, rank_list in model_info.items():
+        if rank_list:
+            model_info_flat[key] = rank_list[0]["value"]
 
     # Write manifest
     manifest = {
@@ -506,9 +629,10 @@ def main():
         "seed": args.seed,
         "dtype": args.dtype,
         "tp_size": args.tp_size,
+        "pp_size": args.pp_size,
         "dump_mode": args.dump_mode,
         "layers_dumped": target_layers or "all",
-        "model_structure": model_info,
+        "model_structure": model_info_flat,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "steps": steps_manifest,
     }
