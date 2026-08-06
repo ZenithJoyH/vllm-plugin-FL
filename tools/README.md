@@ -38,6 +38,32 @@ python tools/dump_layer_outputs.py \
     --backend cuda \
     --tp-size 2 \
     --output-dir ./layer_dumps
+
+# With pipeline parallel
+python tools/dump_layer_outputs.py \
+    --model meta-llama/Llama-3.2-1B-Instruct \
+    --backend cuda \
+    --pp-size 2 \
+    --output-dir ./layer_dumps
+
+# With TP + PP combined
+python tools/dump_layer_outputs.py \
+    --model deepseek-ai/DeepSeek-V2-Lite \
+    --backend cuda \
+    --tp-size 2 \
+    --pp-size 4 \
+    --output-dir ./layer_dumps
+
+# With GPU memory and model length configuration
+python tools/dump_layer_outputs.py \
+    --model meta-llama/Llama-3.2-1B-Instruct \
+    --backend cuda \
+    --tp-size 2 \
+    --pp-size 2 \
+    --gpu-memory-utilization 0.85 \
+    --max-model-len 4096 \
+    --dtype bfloat16 \
+    --output-dir ./layer_dumps
 ```
 
 ### 2. dump_tensors.sh
