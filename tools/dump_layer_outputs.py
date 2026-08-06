@@ -64,17 +64,34 @@ _NORM_SUB_NAMES = {"input_layernorm", "post_attention_layernorm",
                    "input_norm", "post_norm"}
 
 
-def _find_inner_model(model: nn.Module) -> nn.Module:
-    """Navigate to the inner model (e.g., LlamaForCausalLM.model -> LlamaModel).
+# Common attributes that wrap the actual transformer body. Ordered so that
+# classic single-level wrappers (ForCausalLM.model) resolve first, while
+# multimodal wrappers (Qwen3-VL style: ForConditionalGeneration.language_model
+# -> ForCausalLM.model) still get unwrapped.
+_INNER_MODEL_ATTRS = ("model", "transformer", "gpt", "backbone",
+                      "language_model", "text_model", "decoder", "llm")
 
-    Many CausalLM wrappers have a .model attribute pointing to the actual
-    transformer body. We try common attribute names.
+
+def _find_inner_model(model: nn.Module) -> nn.Module:
+    """Navigate to the innermost transformer body.
+
+    Classic case: LlamaForCausalLM.model -> LlamaModel.
+    Multimodal case (Qwen3.5 MoE): Qwen3_5MoeForConditionalGeneration
+    -> language_model (Qwen3_5MoeForCausalLM) -> model (Qwen3_5MoeModel).
+    We drill down iteratively until no more known wrapper attributes are found.
     """
-    for attr in ("model", "transformer", "gpt", "backbone"):
-        inner = getattr(model, attr, None)
-        if inner is not None and isinstance(inner, nn.Module):
-            return inner
-    return model
+    current = model
+    for _ in range(8):
+        inner = None
+        for attr in _INNER_MODEL_ATTRS:
+            candidate = getattr(current, attr, None)
+            if candidate is not None and isinstance(candidate, nn.Module):
+                inner = candidate
+                break
+        if inner is None or inner is current:
+            break
+        current = inner
+    return current
 
 
 def _find_decoder_layers(model: nn.Module) -> Optional[Tuple[str, nn.ModuleList]]:
@@ -101,6 +118,28 @@ def _find_named_module(model: nn.Module, candidates: Set[str]) -> Optional[Tuple
     """Find a direct child module whose name matches one of the candidates."""
     for name, child in model.named_children():
         if name in candidates and not isinstance(child, nn.Identity):
+            return name, child
+    return None
+
+
+def _find_named_module_deep(
+    model: nn.Module,
+    candidates: Set[str],
+    skip_prefixes: Tuple[str, ...] = ("visual", "vision", "tower"),
+) -> Optional[Tuple[str, nn.Module]]:
+    """Find a module anywhere in the tree whose leaf name matches the candidates.
+
+    Used for modules that sit on a wrapper level (e.g. lm_head on
+    ForCausalLM, which is *above* the drilled-down inner model). Sub-trees
+    like the vision tower are skipped so their heads/embeddings don't shadow
+    the language model's.
+    """
+    for name, child in model.named_modules():
+        if isinstance(child, nn.Identity):
+            continue
+        if any(name == p or name.startswith(p + ".") for p in skip_prefixes):
+            continue
+        if name.split(".")[-1] in candidates:
             return name, child
     return None
 
@@ -267,6 +306,10 @@ class HookManager:
 
         # ── LM Head ──
         head_result = _find_named_module(outer_model, _HEAD_NAMES)
+        if head_result is None:
+            # lm_head often sits on a wrapper level above the drilled-down
+            # inner model (e.g. Qwen3.5: language_model.lm_head).
+            head_result = _find_named_module_deep(outer_model, _HEAD_NAMES)
         if head_result is not None:
             head_name, head_mod = head_result
             h = head_mod.register_forward_hook(
@@ -350,18 +393,14 @@ class HookManager:
         return steps_manifest
 
 
-def register_hooks_on_model(llm, hook_manager: HookManager):
-    """Register hooks via LLM.apply_model() — works for all executor types.
+class _RegisterHooks:
+    """Picklable callable for registering hooks on worker models."""
 
-    Because apply_model serializes the closure to a worker process,
-    we attach the hook_manager to the model itself so we can retrieve
-    captured data later with a second apply_model call.
-    """
-    dump_mode = hook_manager.dump_mode
-    target_layers = hook_manager.target_layers
+    def __init__(self, dump_mode: str, target_layers: Optional[List[int]]):
+        self.dump_mode = dump_mode
+        self.target_layers = target_layers
 
-    def _register(model: torch.nn.Module):
-        # Query this worker's TP and PP rank
+    def __call__(self, model: torch.nn.Module):
         from vllm.distributed.parallel_state import (
             get_pp_group,
             get_tensor_model_parallel_rank,
@@ -371,13 +410,47 @@ def register_hooks_on_model(llm, hook_manager: HookManager):
         pp_group = get_pp_group()
         pp_rank = pp_group.rank_in_group if pp_group is not None else 0
 
-        mgr = HookManager(dump_mode=dump_mode, layers=target_layers)
+        mgr = HookManager(dump_mode=self.dump_mode, layers=self.target_layers)
         mgr.register_hooks(model)
         mgr.tp_rank = tp_rank
         mgr.pp_rank = pp_rank
         model._dump_hook_manager = mgr  # noqa: SLF001
 
-    llm.apply_model(_register)
+
+def register_hooks_on_model(llm, hook_manager: HookManager):
+    """Register hooks via LLM.apply_model() — works for all executor types.
+
+    Because apply_model serializes the callable to a worker process,
+    we use a module-level callable class (picklable) instead of a closure.
+    We attach the hook_manager to the model itself so we can retrieve
+    captured data later with a second apply_model call.
+    """
+    llm.apply_model(_RegisterHooks(hook_manager.dump_mode, hook_manager.target_layers))
+
+
+class _RetrieveCaptured:
+    """Picklable callable to retrieve captured tensor data from worker models.
+
+    Must be a class (not a plain function): vLLM serializes apply_model()
+    callables twice — cloudpickle on the main->EngineCore hop, then plain
+    pickle on the EngineCore->workers hop. A plain function is copied *by
+    value* in the first hop, so the second hop can't match it against
+    __main__ by name and fails with:
+        Can't pickle <function ...>: it's not the same object as __main__.xxx
+    Instances of a __main__ class serialize by class reference, which
+    resolves in every process (same pattern as _RegisterHooks).
+    """
+
+    def __call__(self, model: torch.nn.Module):
+        mgr = getattr(model, "_dump_hook_manager", None)
+        if mgr is None:
+            return {"tp_rank": -1, "pp_rank": -1, "captured": {}}
+
+        return {
+            "tp_rank": mgr.tp_rank,
+            "pp_rank": mgr.pp_rank,
+            "captured": dict(mgr.captured)
+        }
 
 
 def retrieve_captured_data(llm) -> Dict[str, List[Dict]]:
@@ -393,19 +466,7 @@ def retrieve_captured_data(llm) -> Dict[str, List[Dict]]:
             ]
         }
     """
-
-    def _retrieve(model: torch.nn.Module):
-        mgr = getattr(model, "_dump_hook_manager", None)
-        if mgr is None:
-            return {"tp_rank": -1, "pp_rank": -1, "captured": {}}
-
-        return {
-            "tp_rank": mgr.tp_rank,
-            "pp_rank": mgr.pp_rank,
-            "captured": dict(mgr.captured)  # {layer_name: {"tensor_name": tensor, ...}}
-        }
-
-    results = llm.apply_model(_retrieve)
+    results = llm.apply_model(_RetrieveCaptured())
 
     # Reorganize: {layer_name: [{tp_rank, pp_rank, tensors}, ...]}
     merged = {}
@@ -430,6 +491,24 @@ def retrieve_captured_data(llm) -> Dict[str, List[Dict]]:
     return merged
 
 
+class _RetrieveInfo:
+    """Picklable callable to retrieve model structure info from workers.
+
+    See _RetrieveCaptured for why this is a class rather than a function.
+    """
+
+    def __call__(self, model: torch.nn.Module):
+        mgr = getattr(model, "_dump_hook_manager", None)
+        if mgr is None:
+            return {"tp_rank": -1, "pp_rank": -1, "info": {}}
+
+        return {
+            "tp_rank": mgr.tp_rank,
+            "pp_rank": mgr.pp_rank,
+            "info": dict(mgr._model_info)
+        }
+
+
 def retrieve_model_info(llm) -> Dict[str, List[Dict]]:
     """Retrieve detected model structure info from all workers.
 
@@ -443,19 +522,7 @@ def retrieve_model_info(llm) -> Dict[str, List[Dict]]:
             ]
         }
     """
-
-    def _retrieve(model: torch.nn.Module):
-        mgr = getattr(model, "_dump_hook_manager", None)
-        if mgr is None:
-            return {"tp_rank": -1, "pp_rank": -1, "info": {}}
-
-        return {
-            "tp_rank": mgr.tp_rank,
-            "pp_rank": mgr.pp_rank,
-            "info": dict(mgr._model_info)
-        }
-
-    results = llm.apply_model(_retrieve)
+    results = llm.apply_model(_RetrieveInfo())
 
     # Reorganize: {info_key: [{tp_rank, pp_rank, value}, ...]}
     merged = {}
@@ -475,16 +542,22 @@ def retrieve_model_info(llm) -> Dict[str, List[Dict]]:
     return merged
 
 
-def cleanup_hooks_on_model(llm):
-    """Remove hooks from the worker model."""
+class _Cleanup:
+    """Picklable callable to remove hooks from worker models.
 
-    def _cleanup(model: torch.nn.Module):
+    See _RetrieveCaptured for why this is a class rather than a function.
+    """
+
+    def __call__(self, model: torch.nn.Module):
         mgr = getattr(model, "_dump_hook_manager", None)
         if mgr is not None:
             mgr.remove_hooks()
             del model._dump_hook_manager
 
-    llm.apply_model(_cleanup)
+
+def cleanup_hooks_on_model(llm):
+    """Remove hooks from the worker model."""
+    llm.apply_model(_Cleanup())
 
 
 def parse_layers_arg(layers_str: str) -> List[int]:
@@ -545,6 +618,10 @@ def main():
         "--pp-size", type=int, default=1, help="Pipeline parallel size"
     )
     parser.add_argument(
+        "--gpu-memory-utilization", type=float, default=0.9,
+        help="GPU memory utilization ratio (0.0 ~ 1.0, default: 0.9)"
+    )
+    parser.add_argument(
         "--dtype", default="auto", help="Model dtype (auto, float16, bfloat16)"
     )
     parser.add_argument(
@@ -576,6 +653,7 @@ def main():
         seed=args.seed,
         tensor_parallel_size=args.tp_size,
         pipeline_parallel_size=args.pp_size,
+        gpu_memory_utilization=args.gpu_memory_utilization,
         dtype=args.dtype,
         trust_remote_code=args.trust_remote_code,
     )
