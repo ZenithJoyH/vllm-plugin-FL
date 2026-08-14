@@ -28,3 +28,5 @@ platforms:
     enabled: true
   metax:
     enabled: true
+  musa:
+    enabled: true
