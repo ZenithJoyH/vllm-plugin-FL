@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """GLM-specific PPU registrations; do not replace generic attention backends."""
 
-from vllm_fl.dispatch.backends.glm5_registration import register_vendor_glm5
+from vllm_fl.dispatch.backends.model_ops import register_vendor_glm5
 
 
 class Glm5TheadBackend:

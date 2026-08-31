@@ -12,9 +12,9 @@ vLLM 0.24.0+empty、FlagGems 5.3.5、Transformers 5.8.1 环境完成：
 
 | 范围 | 结果 |
 | --- | --- |
-| GLM 配置、导入、注册、黑名单、平台边界、MoE clamp | 22 项通过 |
-| 原框架 dispatch 单元测试（未修改测试源码） | 265 项通过 |
-| H128 查询旋转、MHC 归一化、尾池、clamp、metadata eager/graph | 11 项通过 |
+| GLM 配置、导入、注册、黑名单、平台边界、MoE clamp | 27 项通过 |
+| 原框架 dispatch 单元测试 | 275 项通过：265 项原测试 + 10 项输入能力/错误传播测试 |
+| H128、MHC、尾池、clamp、KDA、MQA、cache、metadata | 28 项通过：26 项组件检查，2 项FP8能力拒绝检查；不替代模型验收 |
 | NVIDIA | 仅惰性注册与模拟 top-k 分派检查；未运行 CUDA kernel 或模型 |
 | 新分支整模型启动、正式 GPQA、多模态、MTP、性能 | 未验收 |
 
@@ -29,9 +29,9 @@ vLLM 0.24.0+empty、FlagGems 5.3.5、Transformers 5.8.1 环境完成：
 | --- | --- |
 | 模型 / 配置 | `models/glm5_next*.py`、`configs/glm5_next.py`：KDA、稀疏 MLA、MoE、MHC、权重与状态流 |
 | 算子契约 | `ops/glm5_next.py`、`kernels/glm5_next/indexer_backend.py`：通过 `CachedOp` 请求同名算子，不判断 NVIDIA/非 NVIDIA |
-| 分派与注册 | `dispatch/backends/glm5_registration.py`：沿用 registry、policy、backend availability 和惰性载入 |
-| 通用实现 | `dispatch/backends/flaggems/impl/glm5_*`、`reference/impl/glm5_*`：FlagGems 与数学参考 |
-| 厂商实现 | `vendor/cuda/impl/glm5_*`：原生 CUDA / FP8 / DeepGEMM；`vendor/thead/impl/glm5_*`：PPU BF16 与插件自有 Triton |
+| 分派与注册 | `dispatch/backends/model_ops.py`：沿用 registry、policy、backend availability 和惰性载入 |
+| 通用实现 | `flaggems/impl/{mhc,sparse_indexer,recurrent_kda,bounded_activation}.py`；reference 独立注册 |
+| 厂商实现 | `vendor/cuda/impl/{model_ops,sparse_indexer}.py` 原生 CUDA；`vendor/thead/impl/{recurrent_kda,gather_cache,paged_mqa,causal_conv1d}.py` 保底 |
 | 公共模型 kernel | `kernels/glm5_next/`：kpool 压缩、逐请求尾池、bounded KDA gate、metadata buffer 生命周期 |
 | 版本兼容 | `patches/glm5_next*_v024.py`：GLM 配置、cache spec、metadata 和 reshape 的 v0.24 适配 |
 
@@ -65,16 +65,18 @@ vLLM 0.24.0+empty、FlagGems 5.3.5、Transformers 5.8.1 环境完成：
 
 ## 后端与 graph 限制
 
-查验的 FlagGems revision 为 `4df52d9168ac55c1c1061cefb4638c570292d896`。
+当前实际 FlagGems 包为5.3.5，安装树无Git元数据；历史revision不能当作本次身份。
+本次以安装源码SHA256核验，详见 [`BACKEND_CONTRACTS.md`](BACKEND_CONTRACTS.md)。
 已存在且接口匹配的 Hadamard/MHC/MLA/top-k 等由相应 backend 接入；不在模型里
 绕过分派直接调用 FlagGems。raw K+gate 双平面逐请求尾池没有兼容实现，使用
 `kernels/glm5_next/prefill_tail.py`；pinned FP8 gather 与 PPU BF16 kpool cache 不兼容，
-由 `vendor/thead/impl/glm5_gather_cache.py` 负责。算子来源见
+由 `vendor/thead/impl/gather_cache.py` 负责。算子来源见
 [`PROVENANCE.md`](../../vllm_fl/kernels/glm5_next/PROVENANCE.md)。
 
 外层索引和部分 KDA 路径依赖 v0.24 的 `eager_break_during_capture`。graph 模式需要
 `VLLM_USE_BREAKABLE_CUDAGRAPH=1`，不代表整个模型所有操作都在一张无中断 graph 内。
-reference pack/unpack 会读取 CPU 长度，只能在这类 eager 区间使用。PPU clamp 的
+FlagGems及reference的公开pack/unpack会读取CPU长度，只能在这类eager区间使用。
+调用前守卫在capture中拒绝它们，不会尝试CPU回退。FlagGems clamp 的
 标量 buffer 必须在正常 eager warm-up 时准备。后端在调用前确定实现；不捕获 kernel
 `RuntimeError` 后再重试写缓存操作。新增 Triton 的全面 dtype/布局覆盖仍需逐算子补充，
 本轮只声称测试中列出的组合通过。
@@ -86,8 +88,9 @@ MHC CPU 参考和改变输入的 graph replay；不是只检查 eager 等于 gra
 ## 启动示例（需要单独整模型验证）
 
 显式选择模型 profile；`VLLM_FL_CONFIG` 是框架原有配置入口，不是 plugin 搜索路径。
-`thead.yaml` 保留固定环境的 134 项黑名单，仅对使用该文件的进程生效，不建议复制为
-所有平台的默认配置。`nvidia.yaml` 保留原生 CUDA MHC 策略，硬件验证仍待完成。
+`thead.yaml` 保留固定环境的黑名单，仅对使用该文件的进程生效，不建议复制为
+所有平台的默认配置。原量化gather黑名单已由显式缓存布局守卫替代，BF16仍走vendor。
+两个示例均以FlagGems为首选；NVIDIA硬件验证仍待完成。
 
 以下从插件仓库根目录执行；模型路径、TP、内存及通信设置按实际硬件调整：
 
@@ -116,7 +119,7 @@ eager 验证将 `--compilation-config ...` 换为 `--enforce-eager`。无需 ove
 ```bash
 python -m pytest tests/unit_tests/test_glm5_support.py -q --confcutdir=tests/unit_tests
 python -m pytest tests/unit_tests/dispatch -q --confcutdir=tests/unit_tests/dispatch
-python -m pytest tests/unit_tests/test_glm5_tail_graph.py tests/unit_tests/test_glm5_precision_graph.py -q --confcutdir=tests/unit_tests
+python -m pytest tests/unit_tests/test_glm5_tail_graph.py tests/unit_tests/test_glm5_precision_graph.py tests/unit_tests/test_flaggems_bindings_graph.py -q --confcutdir=tests/unit_tests
 ```
 
 最后一组需要空闲 PPU 设备；CPU-only 或 NVIDIA 不算作这组 PPU 数值验证。

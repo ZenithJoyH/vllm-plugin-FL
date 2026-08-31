@@ -4,23 +4,23 @@
 from torch import nn
 from vllm_fl.dispatch import CachedOp
 
-causal_conv1d_fn = CachedOp("glm5_causal_conv1d_fn")
-causal_conv1d_update = CachedOp("glm5_causal_conv1d_update")
-fused_recurrent_kda = CachedOp("glm5_fused_recurrent_kda")
-chunk_kda_with_safe_gate = CachedOp("glm5_chunk_kda_with_safe_gate")
-fused_safe_kda_gate = CachedOp("glm5_fused_safe_kda_gate")
+causal_conv1d_fn = CachedOp("causal_conv1d_fn")
+causal_conv1d_update = CachedOp("causal_conv1d_update")
+fused_recurrent_kda = CachedOp("fused_recurrent_kda")
+chunk_kda_with_safe_gate = CachedOp("chunk_kda_with_safe_gate")
+fused_safe_kda_gate = CachedOp("fused_safe_kda_gate")
 
 
 class MHCPreOp(nn.Module):
-    forward = staticmethod(CachedOp("glm5_mhc_pre"))
+    forward = staticmethod(CachedOp("mhc_pre_with_norm"))
 
 
 class MHCPostOp(nn.Module):
-    forward = staticmethod(CachedOp("glm5_mhc_post"))
+    forward = staticmethod(CachedOp("mhc_post"))
 
 
 class MHCFusedPostPreOp(nn.Module):
-    forward = staticmethod(CachedOp("glm5_mhc_fused_post_pre"))
+    forward = staticmethod(CachedOp("mhc_fused_post_pre_with_norm"))
 
 
 class SiluAndMulWithClamp(nn.Module):

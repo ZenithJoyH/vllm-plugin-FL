@@ -50,16 +50,12 @@ def test_shared_indexer_has_no_vendor_kernel_or_skip_write_switches():
     assert "INDEXER_BACKEND.is_nvidia" not in source
 
 
-def test_ppu_topk_contract_accepts_vendor_neutral_metadata(monkeypatch):
-    from vllm_fl.dispatch.backends.vendor.thead.impl.glm5_indexer import IndexerOps
+def test_reference_topk_contract_accepts_vendor_neutral_metadata():
+    from vllm_fl.dispatch.backends.reference.impl.sparse_indexer import topk_decode
 
-    ops = IndexerOps()
-    monkeypatch.setattr(ops, "_flag", lambda *args: None)
     logits = torch.tensor([[1.0, 9.0, 3.0, 7.0], [8.0, 2.0, 6.0, 5.0]])
     output = torch.empty(2, 2, dtype=torch.int32)
-    ops.topk_decode(
-        logits, 1, torch.tensor([3, 4]), output, 2, 4, 1, 2, max_seq_len=100
-    )
+    topk_decode(logits, 1, torch.tensor([3, 4]), output, 2, 4, 1, 2, max_seq_len=100)
     torch.testing.assert_close(
         output, torch.tensor([[1, 2], [0, 2]], dtype=torch.int32)
     )
@@ -71,8 +67,9 @@ def test_ppu_topk_contract_accepts_vendor_neutral_metadata(monkeypatch):
 def test_cuda_topk_backend_preserves_selection(
     monkeypatch, top_k, max_seq_len, expected
 ):
-    from vllm_fl.dispatch.backends.vendor.cuda.impl.glm5_indexer import IndexerOps
     import vllm.v1.worker.workspace as workspace
+
+    from vllm_fl.dispatch.backends.vendor.cuda.impl.sparse_indexer import IndexerOps
 
     calls = []
     monkeypatch.setattr(
@@ -106,17 +103,21 @@ def test_cuda_topk_backend_preserves_selection(
 
 @pytest.mark.parametrize("vendor", ["cuda", "thead"])
 def test_indexer_contract_registered_lazily(vendor):
-    from vllm_fl.dispatch.registry import OpRegistry
-    from vllm_fl.dispatch.backends.glm5_registration import (
-        register_vendor_glm5,
+    from vllm_fl.dispatch.backends.model_ops import (
         INDEXER_OPS,
+        REFERENCE_INDEXER,
+        register_vendor_glm5,
     )
+    from vllm_fl.dispatch.registry import OpRegistry
 
     registry = OpRegistry()
     register_vendor_glm5(registry, SimpleNamespace(is_available=lambda: True), vendor)
     entries = registry.snapshot().impls_by_op
     for name in INDEXER_OPS:
-        (impl,) = entries["glm5_indexer_" + name]
+        if vendor == "thead" and name in REFERENCE_INDEXER:
+            assert "sparse_indexer_" + name not in entries
+            continue
+        (impl,) = entries["sparse_indexer_" + name]
         assert impl.vendor == vendor
         assert impl.is_available()
 
@@ -126,7 +127,7 @@ def test_indexer_contract_registered_lazily(vendor):
     [("thead", 8, 32), ("thead", None, 32), ("cuda", 9, 64), ("cuda", 10, 32)],
 )
 def test_compressed_pages_follow_vendor_contract(vendor, major, expected):
-    from vllm_fl.dispatch.backends.glm5_registration import compressed_page_size
+    from vllm_fl.dispatch.backends.model_ops import compressed_page_size
 
     platform = SimpleNamespace(
         get_device_capability=lambda: SimpleNamespace(major=major)
@@ -135,17 +136,17 @@ def test_compressed_pages_follow_vendor_contract(vendor, major, expected):
 
 
 def test_unknown_vendor_does_not_inherit_ppu_layout():
-    from vllm_fl.dispatch.backends.glm5_registration import compressed_page_size
+    from vllm_fl.dispatch.backends.model_ops import compressed_page_size
 
     with pytest.raises(NotImplementedError):
         compressed_page_size("unsupported", SimpleNamespace())
 
 
 def test_blacklist_covers_fused_mhc_dependencies(monkeypatch):
-    from vllm_fl.dispatch.registry import OpRegistry
-    from vllm_fl.dispatch.backends.glm5_registration import register_mhc
-    from vllm_fl.dispatch.types import BackendImplKind
     import vllm_fl.utils
+    from vllm_fl.dispatch.backends.model_ops import register_mhc
+    from vllm_fl.dispatch.registry import OpRegistry
+    from vllm_fl.dispatch.types import BackendImplKind
 
     monkeypatch.setattr(
         vllm_fl.utils, "use_flaggems_op", lambda name: name != "mhc_post"
@@ -155,14 +156,14 @@ def test_blacklist_covers_fused_mhc_dependencies(monkeypatch):
         registry, SimpleNamespace(is_available=lambda: True), BackendImplKind.DEFAULT
     )
     entries = registry.snapshot().impls_by_op
-    assert "glm5_mhc_pre" in entries
-    assert "glm5_mhc_post" not in entries
-    assert "glm5_mhc_fused_post_pre" not in entries
+    assert "mhc_pre_with_norm" in entries
+    assert "mhc_post" not in entries
+    assert "mhc_fused_post_pre_with_norm" not in entries
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_bounded_activation_matches_definition(dtype):
-    ref = load_file("vllm_fl/dispatch/backends/reference/impl/glm5_mhc.py")
+    ref = load_file("vllm_fl/dispatch/backends/reference/impl/mhc.py")
     x = torch.linspace(-40, 40, 128).reshape(4, 32).to(dtype)
     gate, up = x.chunk(2, -1)
     gate = gate.clamp(max=10)
@@ -187,14 +188,15 @@ def test_config_validation_is_local():
     allowed = upstream.ALLOWED_LAYER_TYPES
     config = load_file("vllm_fl/configs/glm5_next.py")
     config.Glm5NextTextConfig()
-    assert upstream.ALLOWED_LAYER_TYPES == allowed
+    assert allowed == upstream.ALLOWED_LAYER_TYPES
     with pytest.raises(ValueError):
         config.Glm5NextTextConfig(layer_types=["unknown"] * 45)
 
 
 def test_v024_registration_and_model_import():
-    import vllm_fl
     from vllm.model_executor.layers.mhc import MHCPreOp
+
+    import vllm_fl
 
     original = MHCPreOp.forward_oot
     vllm_fl.register_model()
@@ -206,10 +208,11 @@ def test_v024_registration_and_model_import():
 
 
 def test_moe_clamp_and_unclamped_paths(monkeypatch):
-    from vllm_fl.ops.fused_moe import activation
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
-    ref = load_file("vllm_fl/dispatch/backends/reference/impl/glm5_mhc.py")
+    from vllm_fl.ops.fused_moe import activation
+
+    ref = load_file("vllm_fl/dispatch/backends/reference/impl/mhc.py")
     monkeypatch.setattr(
         activation, "_silu_and_mul_with_clamp", ref.silu_and_mul_with_clamp
     )
@@ -227,27 +230,60 @@ def test_moe_clamp_and_unclamped_paths(monkeypatch):
     torch.testing.assert_close(out, ref.silu_and_mul_with_clamp(x, 10.0))
 
 
-def test_backend_error_is_not_retried_after_cache_write():
-    from vllm_fl.dispatch.backends.vendor.thead.impl.glm5_indexer import IndexerOps
+def test_vendor_does_not_hide_flaggems_provider_selection():
+    source = (
+        ROOT / "vllm_fl/dispatch/backends/vendor/thead/impl/sparse_indexer.py"
+    ).read_text()
+    assert "flag_gems" not in source
+    assert "_call_flag" not in source
+    assert "_flag_ops" not in source
 
-    calls = []
 
-    def broken(*args):
-        calls.append("kernel")
-        raise RuntimeError("asynchronous kernel failure")
+def test_portable_exports_resolve():
+    from vllm_fl.kernels.glm5_next import portable
 
-    def fallback(*args):
-        calls.append("fallback")
+    assert all(hasattr(portable, name) for name in portable.__all__)
 
-    with pytest.raises(RuntimeError):
-        IndexerOps()._call_flag("cache_write", broken, fallback)
-    assert calls == ["kernel"]
+
+@pytest.mark.parametrize(
+    "dependency,op",
+    [
+        ("hadamard_transform", "rotate_indexer_query"),
+        ("cp_gather_indexer_k_quant_cache", "gather_cache"),
+        ("per_token_group_quant_fp8", "prepare_query"),
+    ],
+)
+def test_flaggems_dependency_blacklist(dependency, op, monkeypatch):
+    import vllm_fl.utils
+    from vllm_fl.dispatch.backends.model_ops import register_flaggems_model_ops
+    from vllm_fl.dispatch.registry import OpRegistry
+
+    monkeypatch.setattr(
+        vllm_fl.utils, "use_flaggems_op", lambda name: name != dependency
+    )
+    registry = OpRegistry()
+    register_flaggems_model_ops(registry, SimpleNamespace(is_available=lambda: True))
+    assert "sparse_indexer_" + op not in registry.snapshot().impls_by_op
+
+
+def test_pack_and_unpack_reject_capture_before_reading_lengths(monkeypatch):
+    from vllm_fl.dispatch.backends.flaggems.impl.sparse_indexer import supports_pack
+    from vllm_fl.dispatch.backends.reference.impl.sparse_indexer import (
+        supports_pack as ref_guard,
+    )
+
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    tensor = SimpleNamespace(
+        device=SimpleNamespace(type="cuda"), is_contiguous=lambda: True
+    )
+    assert not supports_pack(tensor, None)
+    assert not ref_guard(tensor, None)
 
 
 def test_runner_adapter_leaves_other_models_unchanged(monkeypatch):
     from vllm_fl.patches.glm5_next_runner_v024 import (
-        install_glm5_runner_adapter,
         ModelRunnerFL,
+        install_glm5_runner_adapter,
     )
 
     expected = object()

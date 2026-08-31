@@ -384,16 +384,9 @@ def append_tail_to_topk(
 __all__ = [
     "append_tail_to_topk",
     "causal_conv1d_fn",
-    "causal_conv1d_update",
     "chunk_kda_with_safe_gate",
     "expand_pools_to_tokens",
-    "fused_recurrent_kda",
-    "get_fp8_dtype_and_max",
     "hadamard128",
-    "kpool_compress_and_write_cache",
-    "kpool_decode_update_and_maybe_write_cache_batched",
     "recurrent_kda",
     "safe_kda_gate",
-    "safe_kda_gate_chunk_cumsum",
-    "write_fp8_cache",
 ]

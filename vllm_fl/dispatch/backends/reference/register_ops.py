@@ -129,5 +129,7 @@ def register_builtins(registry) -> None:
     ]
 
     registry.register_many(impls)
-    from vllm_fl.dispatch.backends.glm5_registration import register_mhc
+    from vllm_fl.dispatch.backends.model_ops import register_mhc
     register_mhc(registry, backend, BackendImplKind.REFERENCE)
+    from vllm_fl.dispatch.backends.model_ops import register_reference_indexer
+    register_reference_indexer(registry, backend)

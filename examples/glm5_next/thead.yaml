@@ -2,13 +2,12 @@
 prefer: flagos
 strict: true
 op_backends:
-  silu_and_mul_with_clamp: [vendor:thead]
-  glm5_mhc_pre: [flagos, reference]
-  glm5_mhc_post: [flagos, reference]
-  glm5_mhc_fused_post_pre: [flagos, reference]
+  silu_and_mul_with_clamp: [flagos, reference]
+  mhc_pre_with_norm: [flagos, reference]
+  mhc_post: [flagos, reference]
+  mhc_fused_post_pre_with_norm: [flagos, reference]
 flagos_blacklist:
   - index
-  - cp_gather_indexer_k_quant_cache
   - mm
   - bmm
   - mm_out

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """FlagGems MHC adapters; the contract includes exactly one RMSNorm."""
 
-from vllm_fl.dispatch.backends.reference.impl.glm5_mhc import rms_norm
+from vllm_fl.dispatch.backends.reference.impl.mhc import rms_norm
 
 
 def mhc_pre(
@@ -77,16 +77,3 @@ def mhc_fused_post_pre(
             norm_eps,
         ),
     )
-
-
-def silu_and_mul_with_clamp(x, limit, alpha=1.0, beta=0.0):
-    if alpha != 1.0 or beta != 0.0:
-        from vllm_fl.dispatch.backends.reference.impl.glm5_mhc import (
-            silu_and_mul_with_clamp as ref,
-        )
-
-        return ref(x, limit, alpha, beta)
-    from flag_gems.fused.silu_and_mul_with_clamp import silu_and_mul_with_clamp as impl
-
-    gate, up = x.chunk(2, dim=-1)
-    return impl(gate, up, limit)

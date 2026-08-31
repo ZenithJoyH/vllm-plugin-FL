@@ -212,6 +212,15 @@ class CachedOp:
             or self._manager_epoch != manager_epoch
             or self._policy_epoch != policy_epoch
         ):
+            candidates = mgr.resolve_candidates(self._op_name)
+            if any(candidate.supports is not None for candidate in candidates):
+                # Shape/layout support must be reevaluated on every invocation;
+                # never cache a provider selected for a different input shape.
+                self._use_manager_call = True
+                self._manager_id = manager_id
+                self._manager_epoch = mgr.policy_epoch
+                self._policy_epoch = get_policy_epoch()
+                return mgr.call(self._op_name, *args, **kwargs)
             impl = mgr._resolve_impl(self._op_name)
             mgr._record_first_use(self._op_name, impl)
             self._impl = impl
@@ -224,7 +233,7 @@ class CachedOp:
             return impl.fn(*args, **kwargs)
         except Exception:
             self._impl = None
-            if get_policy().strict:
+            if get_policy().strict or not impl.allow_runtime_fallback:
                 raise
             mgr._mark_failed_impl(self._op_name, impl.impl_id)
             self._use_manager_call = True

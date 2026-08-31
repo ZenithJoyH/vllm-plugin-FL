@@ -493,9 +493,10 @@ def _indexer_forward_nope(
     # Omitting this rotation silently corrupts sparse selection beyond top-k.
     q = INDEXER_BACKEND.rotate_indexer_query(q)
     q = q.view(-1, self.head_dim)
-    q_fp8, q_scale = INDEXER_BACKEND.per_token_group_quant_fp8(
+    q_fp8, q_scale = INDEXER_BACKEND.prepare_query(
         q,
         self.quant_block_size,
+        output_dtype=INDEXER_BACKEND.query_dtype,
         column_major_scales=False,
         use_ue8m0=self.scale_fmt is not None,
     )

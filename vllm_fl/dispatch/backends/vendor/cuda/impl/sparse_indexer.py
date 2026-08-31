@@ -21,11 +21,14 @@ class IndexerOps:
 
         return hadamard_transform(q, scale=128 ** (-0.5))
 
-    def per_token_group_quant_fp8(self, *args, **kwargs):
+    def prepare_query(self, *args, output_dtype, **kwargs):
         from vllm.model_executor.layers.quantization.utils.fp8_utils import (
             per_token_group_quant_fp8,
         )
 
+        from vllm.platforms import current_platform
+        if output_dtype != current_platform.fp8_dtype():
+            raise ValueError("CUDA query storage must use the platform FP8 dtype")
         return per_token_group_quant_fp8(*args, **kwargs)
 
     def indexer_k_quant_and_cache(self, *args, **kwargs) -> None:
@@ -33,7 +36,7 @@ class IndexerOps:
 
         return ops.indexer_k_quant_and_cache(*args, **kwargs)
 
-    def cp_gather_indexer_k_quant_cache(self, *args, **kwargs) -> None:
+    def gather_cache(self, *args, **kwargs) -> None:
         from vllm import _custom_ops as ops
 
         return ops.cp_gather_indexer_k_quant_cache(*args, **kwargs)

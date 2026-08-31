@@ -2,6 +2,6 @@
 prefer: flagos
 strict: true
 op_backends:
-  glm5_mhc_pre: [vendor:cuda]
-  glm5_mhc_post: [vendor:cuda]
-  glm5_mhc_fused_post_pre: [vendor:cuda]
+  mhc_pre_with_norm: [flagos, vendor:cuda, reference]
+  mhc_post: [flagos, vendor:cuda, reference]
+  mhc_fused_post_pre_with_norm: [flagos, vendor:cuda, reference]

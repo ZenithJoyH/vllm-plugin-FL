@@ -390,7 +390,7 @@ def sparse_attn_indexer_kpool(
             if not use_fp4_cache:
                 k_scale.fill_(1.0)
             if not chunk.skip_kv_gather:
-                INDEXER_BACKEND.cp_gather_indexer_k_quant_cache(
+                INDEXER_BACKEND.gather_cache(
                     kv_cache,
                     k_quant,
                     k_scale,

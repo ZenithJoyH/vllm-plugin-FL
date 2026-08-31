@@ -95,3 +95,42 @@ def _torch_unpack_seq(tensor: torch.Tensor, lengths: torch.Tensor) -> torch.Tens
     if not pieces:
         return tensor.new_empty((0, *tensor.shape[2:]))
     return torch.cat(pieces, dim=0)
+
+
+def rotate_indexer_query(q):
+    from vllm_fl.kernels.glm5_next.portable import hadamard128
+
+    if q.shape[-1] != 128:
+        raise ValueError("Indexer rotation requires head_dim=128")
+    return hadamard128(q.float()).to(q.dtype)
+
+
+def topk_prefill(
+    logits, row_starts, row_ends, indices, num_rows, stride0, stride1, top_k
+):
+    indices.copy_(_torch_topk(logits, row_starts, row_ends, top_k, True))
+
+
+def topk_decode(
+    logits,
+    next_n,
+    seq_lens,
+    indices,
+    num_rows,
+    stride0,
+    stride1,
+    top_k,
+    *,
+    max_seq_len=None,
+):
+    ends = (
+        seq_lens.reshape(-1)
+        if seq_lens.ndim == 2
+        else seq_lens.repeat_interleave(next_n)
+    )[:num_rows]
+    indices.copy_(_torch_topk(logits, torch.zeros_like(ends), ends, top_k, False))
+
+
+def supports_pack(tensor, lengths, *args, **kwargs):
+    # Output shape depends on device values; never synchronize during capture.
+    return tensor.device.type != "cuda" or not torch.cuda.is_current_stream_capturing()

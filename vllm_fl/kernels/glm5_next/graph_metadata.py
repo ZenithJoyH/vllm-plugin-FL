@@ -4,10 +4,10 @@
 
 def update_compressed_block_table(owner, table, factor):
     compressed = table[:, ::factor] // factor
-    buffers = getattr(owner, "_glm5_indexer_block_tables", None)
+    buffers = getattr(owner, "_sparse_indexer_block_tables", None)
     if buffers is None:
         buffers = {}
-        owner._glm5_indexer_block_tables = buffers
+        owner._sparse_indexer_block_tables = buffers
     shape = tuple(compressed.shape)
     buffer = buffers.get(shape)
     if buffer is None:
