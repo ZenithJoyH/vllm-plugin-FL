@@ -37,6 +37,23 @@ def register_builtins(registry) -> None:
     is_avail = backend.is_available
 
     impls = [
+        # Pure PyTorch mHC baselines; keep the standard reference priority.
+        OpImpl(
+            op_name="mhc_pre",
+            impl_id="reference.torch",
+            kind=BackendImplKind.REFERENCE,
+            fn=_bind_is_available(backend.mhc_pre, is_avail),
+            vendor=None,
+            priority=BackendPriority.REFERENCE,
+        ),
+        OpImpl(
+            op_name="mhc_post",
+            impl_id="reference.torch",
+            kind=BackendImplKind.REFERENCE,
+            fn=_bind_is_available(backend.mhc_post, is_avail),
+            vendor=None,
+            priority=BackendPriority.REFERENCE,
+        ),
         OpImpl(
             op_name="fused_marlin_moe",
             impl_id="reference.torch",

@@ -175,9 +175,28 @@ def register_model():
         )
     except Exception as e:
         logger.error(f"Register DeepseekV4 model error: {str(e)}")
-    # Register TeleChat mHC patches for DeepSeekV3-based models
-    try:
-        from vllm_fl.patches.deepseek_v2_mhc import apply_model_patches as telechat_mhc
-        telechat_mhc()
-    except Exception as e:
-        logger.error("Register TeleChat mHC patch error: %s", str(e))
+
+    # Register XingChen4 lazily, without importing its model or API parser.
+    from vllm.reasoning import ReasoningParserManager
+    from vllm.transformers_utils.config import _CONFIG_REGISTRY
+    from vllm.transformers_utils.model_arch_config_convertor import (
+        MODEL_ARCH_CONFIG_CONVERTORS,
+        ModelArchConfigConvertorBase,
+    )
+
+    from vllm_fl.configs.xingchen4 import XingChen4Config
+
+    # Importing the converter in the HF config module causes a circular import.
+    # Keep this model-specific converter in the registration phase instead.
+    class XingChen4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
+        def is_deepseek_mla(self) -> bool:
+            return True
+
+    _CONFIG_REGISTRY["xingchen4"] = XingChen4Config
+    MODEL_ARCH_CONFIG_CONVERTORS["xingchen4"] = XingChen4ModelArchConfigConvertor
+    ModelRegistry.register_model(
+        "XingChen4ForCausalLM", "vllm_fl.models.xingchen4:XingChen4ForCausalLM"
+    )
+    ReasoningParserManager.register_lazy_module(
+        "xingchen4", "vllm_fl.reasoning.xingchen4_reasoning", "XingChen4ReasoningParser"
+    )

@@ -5,6 +5,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
+import os
 from typing import ClassVar, Optional, Union
 
 import torch
@@ -27,7 +28,11 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.platforms import current_platform
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 
-from flag_gems import flash_attn_varlen_func, flash_mla, concat_and_cache_mla as flag_gems_concat_and_cache_mla
+from flag_gems import (
+    flash_attn_varlen_func,
+    concat_and_cache_mla as flag_gems_concat_and_cache_mla,
+    flash_mla_with_kvcache,
+)
 
 logger = init_logger(__name__)
 
@@ -162,8 +167,8 @@ class MLAFLImpl(MLACommonImpl[MLACommonMetadata]):
             # ---- Gather KV cache into workspace ----
             if not use_fp8_prefill:
                 if getattr(current_platform, "vendor_name", "") == "thead":
-                    from flag_gems import gather_and_maybe_dequant_cache as flag_gems_gather_and_maybe_dequant_cache
                     # T-Head backend: use FlagGems gather_and_maybe_dequant_cache
+                    from flag_gems import gather_and_maybe_dequant_cache as flag_gems_gather_and_maybe_dequant_cache
                     flag_gems_gather_and_maybe_dequant_cache(
                         src_cache=kv_c_and_k_pe_cache,
                         dst=workspace,
@@ -322,38 +327,61 @@ class MLAFLImpl(MLACommonImpl[MLACommonMetadata]):
         q_num_heads = q.shape[1]
         head_dim = q.shape[2]
 
-        lse = torch.zeros(B, q_num_heads, dtype=q.dtype, device=q.device)
-
-        # kv_c_and_k_pe_cache shape: (num_blocks, block_size, head_dim)
-        PAGE_SIZE = kv_c_and_k_pe_cache.size(1)
-
-        # NOTE: FlagGems' flash_mla kernel internally computes
-        # sm_scale = 1/sqrt(d) where d = head_dim = kv_lora_rank + qk_rope_head_dim.
-        # But the correct sm_scale for MLA should be 1/sqrt(qk_head_dim).
-        # We compensate by pre-scaling q with sqrt(head_dim / qk_head_dim).
-        scale_factor = math.sqrt(head_dim / self._qk_head_dim)
-        q = q * scale_factor
-
-        # flash_mla expects q shape: (batch_size, s_q, head_num, d)
-        # Current q shape: (B, N, D) -> reshape to (B, 1, N, D) for s_q=1
+        # flash_mla_with_kvcache expects q shape: (batch_size, seq_len_q, num_heads_q, head_dim)
+        # Current q shape: (B, N, D) -> reshape to (B, 1, N, D) for seq_len_q=1
         q_4d = q.unsqueeze(1)
 
-        o = flash_mla(
-            q_4d,
-            attn_metadata.decode.block_table,
-            kv_c_and_k_pe_cache,
-            None,            # max_seqlen_pad (unused in kernel)
-            PAGE_SIZE,       # block_size
-            B,               # b
-            1,               # s_q (decode = 1 token per request)
-            attn_metadata.decode.seq_lens,  # cache_seqlens
-            q_num_heads,     # h_q
-            1,               # h_kv (MLA uses 1 kv head)
-            head_dim,        # d (kv_lora_rank + qk_rope_head_dim)
-            head_dim_v,      # dv (kv_lora_rank)
-            True,            # causal
-        )
-        # flash_mla returns (b, s_q, h_q, dv) -> reshape to (B, N, dv)
-        o = o.squeeze(1)
+        # flash_mla_with_kvcache expects k_cache shape: (num_blocks, block_size, num_heads_kv, head_dim)
+        # vLLM's MLA kv cache is 3D: (num_blocks, block_size, head_dim) with implicit h_kv=1
+        # Add the h_kv dimension
+        k_cache_4d = kv_c_and_k_pe_cache.unsqueeze(2)  # -> (num_blocks, block_size, 1, head_dim)
 
-        return o.clone(), lse
+        # Create FlashMLASchedMeta required by flash_mla_with_kvcache
+        # MLACommonDecodeMetadata doesn't have scheduler_metadata, so we create a new one
+        # using get_mla_metadata() which returns (FlashMLASchedMeta, None)
+        # Use scheduler_metadata from attn_metadata if available, otherwise create empty one
+        if hasattr(attn_metadata.decode, "scheduler_metadata"):
+            scheduler_metadata = attn_metadata.decode.scheduler_metadata
+        else:
+            from flag_gems.fused.flash_mla_with_kvcache import get_mla_metadata
+            scheduler_metadata, _ = get_mla_metadata()
+
+        # Use self.scale which already includes the mscale correction from the model
+        # (self.scale = qk_head_dim**-0.5 * mscale * mscale for YaRN models)
+        softmax_scale = self.scale
+
+        # Debug: print shapes once
+        import os
+        if not hasattr(self, '_debug_printed2'):
+            self._debug_printed2 = True
+            has_sched = hasattr(attn_metadata.decode, 'scheduler_metadata')
+            print(f'[MLA DEBUG2] has scheduler_metadata: {has_sched}', flush=True)
+            if has_sched:
+                sm = attn_metadata.decode.scheduler_metadata
+                print(f'[MLA DEBUG2] scheduler_metadata type: {type(sm)}, have_initialized: {getattr(sm, "have_initialized", "N/A")}', flush=True)
+
+        # Call flash_mla_with_kvcache which returns (out, lse)
+        o, lse = flash_mla_with_kvcache(
+            q=q_4d,
+            k_cache=k_cache_4d,
+            block_table=attn_metadata.decode.block_table,
+            cache_seqlens=attn_metadata.decode.seq_lens,
+            head_dim_v=self.kv_lora_rank,
+            tile_scheduler_metadata=scheduler_metadata,
+            softmax_scale=softmax_scale,
+            causal=True,
+        )
+
+        # flash_mla_with_kvcache returns:
+        # out: (batch_size, seq_len_q, num_heads_q, head_dim_v)
+        # lse: (batch_size, num_heads_q, seq_len_q)
+        # Reshape to (B, N, head_dim_v) for vLLM
+        o = o.squeeze(1)  # Remove seq_len_q=1 dimension
+
+        # Transpose lse from (B, N, 1) to match expected shape (B, N)
+        lse = lse.squeeze(-1)  # Remove seq_len_q=1 dimension
+
+        # .clone() is required: the Triton kernel output buffer may be reused
+        # by CUDAGraph replay on subsequent iterations, so we must copy the
+        # data out before returning to prevent it from being overwritten.
+        return o.clone(), lse.clone()

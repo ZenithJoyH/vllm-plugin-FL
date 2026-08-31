@@ -520,3 +520,34 @@ class ReferenceBackend(Backend):
         from .impl.deepseek_v4_attn import unpack_seq_triton_torch
 
         return unpack_seq_triton_torch(packed_tensor, lengths)
+
+    def mhc_pre(
+        self,
+        residual: torch.Tensor,
+        fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        rms_eps: float,
+        hc_pre_eps: float,
+        hc_sinkhorn_eps: float,
+        hc_post_mult_value: float,
+        sinkhorn_repeat: int,
+        n_splits: int = 1,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        from .impl.mhc import mhc_pre_reference
+
+        return mhc_pre_reference(
+            residual, fn, hc_scale, hc_base, rms_eps, hc_pre_eps,
+            hc_sinkhorn_eps, hc_post_mult_value, sinkhorn_repeat, n_splits,
+        )
+
+    def mhc_post(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post: torch.Tensor,
+        comb: torch.Tensor,
+    ) -> torch.Tensor:
+        from .impl.mhc import mhc_post_reference
+
+        return mhc_post_reference(x, residual, post, comb)
