@@ -409,6 +409,9 @@ class OpManager:
         Raises:
             RuntimeError: If no implementation found
         """
+        candidates = self.resolve_candidates(op_name)
+        if any(impl.supports is not None for impl in candidates):
+            return lambda *args, **kwargs: self.call(op_name, *args, **kwargs)
         return self._resolve_impl(op_name).fn
 
     def resolve_candidates(self, op_name: str) -> list[OpImpl]:
@@ -515,6 +518,12 @@ class OpManager:
           - VLLM_FL_STRICT=1: strict mode — fail immediately on the first error,
             no fallback is attempted.
 
+        Input capability predicates run before invocation in either mode. An
+        unsupported shape is skipped within the user's allowed backend order;
+        this is not a kernel failure and does not poison later shapes. Kernels
+        with allow_runtime_fallback=False propagate errors even in non-strict
+        mode, since a retry could apply their state mutation twice.
+
         Logs on first call or when the implementation changes (e.g., backend switch).
 
         Args:
@@ -530,12 +539,17 @@ class OpManager:
         """
         enable_fallback = not get_policy().strict
 
+        candidates = self.resolve_candidates(op_name)
+        candidates = [impl for impl in candidates
+                      if impl.supports is None or impl.supports(*args, **kwargs)]
+        if not candidates:
+            raise RuntimeError(f"No implementation supports the inputs for op='{op_name}'")
+
         if not enable_fallback:
-            impl = self._resolve_impl(op_name)
+            impl = candidates[0]
             self._record_first_use(op_name, impl)
 
             return self._call_with_hooks(op_name, impl.fn, args, kwargs)
-        candidates = self.resolve_candidates(op_name)
         last_error = None
 
         # Get failed implementations for this op (skip them)
@@ -578,6 +592,8 @@ class OpManager:
                 return result
 
             except Exception as e:
+                if not impl.allow_runtime_fallback:
+                    raise
                 last_error = e
                 # Mark this implementation as failed
                 self._mark_failed_impl(op_name, impl.impl_id)

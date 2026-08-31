@@ -1,0 +1,7 @@
+# Native CUDA MHC and FP8 indexer; hardware validation remains pending.
+prefer: flagos
+strict: true
+op_backends:
+  mhc_pre_with_norm: [flagos, vendor:cuda, reference]
+  mhc_post: [flagos, vendor:cuda, reference]
+  mhc_fused_post_pre_with_norm: [flagos, vendor:cuda, reference]

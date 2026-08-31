@@ -54,6 +54,10 @@ class OpImpl:
         priority: Priority for selection (higher = preferred)
         supported_dtypes: Set of supported data types (optional)
         min_arch: Minimum architecture requirement (optional)
+        supports: Pure pre-launch input-metadata predicate. False skips this
+            implementation for this call without marking it failed.
+        allow_runtime_fallback: Whether non-strict policy may retry after a
+            kernel error. Set False for kernels with state/cache side effects.
     """
 
     op_name: str
@@ -64,6 +68,11 @@ class OpImpl:
     priority: int = 0
     supported_dtypes: Optional[Set[str]] = None
     min_arch: Optional[str] = None
+    # Pure, pre-launch metadata check. Never read tensor values or mutate inputs.
+    # False skips this implementation for this call, not for future shapes.
+    supports: Optional[Callable[..., bool]] = None
+    # Stateful kernels cannot safely retry after a partially completed launch.
+    allow_runtime_fallback: bool = True
 
     def __post_init__(self):
         if self.kind == BackendImplKind.VENDOR and not self.vendor:

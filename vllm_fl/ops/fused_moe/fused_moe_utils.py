@@ -296,7 +296,11 @@ class TritonExpertsFL(TritonExperts):
         apply_router_weight_on_input: bool,
     ):
         # Fast path (no LoRA, NVIDIA only): single fused FlagGems call.
-        if self._lora_context is None and current_platform.is_cuda():
+        if (
+            self._lora_context is None
+            and current_platform.is_cuda()
+            and self.quant_config.gemm1_clamp_limit is None
+        ):
             import flag_gems
 
             output.copy_(flag_gems.fused_experts_impl(
@@ -450,7 +454,10 @@ class TritonExpertsFL(TritonExperts):
             )
 
         apply_moe_activation(
-            activation, intermediate_cache2, intermediate_cache1.view(-1, N)
+            activation,
+            intermediate_cache2,
+            intermediate_cache1.view(-1, N),
+            clamp_limit=self.quant_config.gemm1_clamp_limit,
         )
 
         a2q_scale: torch.Tensor | None = None

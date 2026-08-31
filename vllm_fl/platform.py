@@ -263,6 +263,18 @@ class PlatformFL(Platform):
         use_mla = attn_selector_config.use_mla
         use_sparse = attn_selector_config.use_sparse
 
+        # The GLM contract selects its NoPE-aware backend without changing the
+        # default attention implementation used by unrelated architectures.
+        if use_mla:
+            from vllm.config import get_current_vllm_config
+
+            config = get_current_vllm_config()
+            if (
+                config.model_config is not None
+                and config.model_config.hf_text_config.model_type == "glm5_next_text"
+            ):
+                return call_op("glm5_attention_backend")
+
         backend_path = call_op("attention_backend", use_mla=use_mla, use_sparse=use_sparse)
 
         logger.info_once(
