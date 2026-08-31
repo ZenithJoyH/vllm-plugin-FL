@@ -129,3 +129,5 @@ def register_builtins(registry) -> None:
     ]
 
     registry.register_many(impls)
+    from vllm_fl.dispatch.backends.glm5_registration import register_vendor_glm5
+    register_vendor_glm5(registry, backend, "cuda")

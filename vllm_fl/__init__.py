@@ -138,6 +138,14 @@ def register_router():
 
 def register_model():
     """Register FL-specific models not yet upstream."""
+    # Check the version before importing v0.24-only config/attention APIs.
+    from vllm_fl.patches._version import is_vllm_024
+
+    if is_vllm_024():
+        from vllm_fl.patches.glm5_next_v024 import apply_glm5_next_v024_patches
+
+        apply_glm5_next_v024_patches()
+
     _register_flagcx_connector()
 
     # Register OOT quant kernels so kernel selection can find them

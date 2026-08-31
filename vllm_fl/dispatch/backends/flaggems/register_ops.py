@@ -132,3 +132,5 @@ def register_builtins(registry) -> None:
 
     filtered = [impl for impl in impls if use_flaggems_op(impl.op_name)]
     registry.register_many(filtered)
+    from vllm_fl.dispatch.backends.glm5_registration import register_mhc
+    register_mhc(registry, backend, BackendImplKind.DEFAULT)

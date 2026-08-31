@@ -1,0 +1,7 @@
+# Native CUDA MHC and FP8 indexer; hardware validation remains pending.
+prefer: flagos
+strict: true
+op_backends:
+  glm5_mhc_pre: [vendor:cuda]
+  glm5_mhc_post: [vendor:cuda]
+  glm5_mhc_fused_post_pre: [vendor:cuda]
