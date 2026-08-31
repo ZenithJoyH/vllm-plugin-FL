@@ -152,6 +152,11 @@ def register_builtins(registry: OpRegistry) -> None:
     except Exception as e:
         logger.warning(f"Failed to register Reference operators: {e}")
 
+    # Portable plugin-owned extensions missing from the pinned FlagGems.
+    # Registration is lazy: unrelated models do not import these kernels.
+    from .backends.triton.register_ops import register_builtins as register_triton
+    register_triton(registry)
+
     # Auto-discover and register VENDOR implementations
     _register_vendor_backends(registry)
 
