@@ -260,6 +260,14 @@ class PlatformFL(Platform):
                 attention_config.use_trtllm_attention = False
                 attention_config.disable_flashinfer_prefill = True
 
+        # --------------------------------------------------------
+        # thead (PPU) specific config updates
+        if cls.vendor_name == "thead":
+            if attention_config := vllm_config.attention_config:
+                # PPU NOTE: set 0 to get better performance for FA3 on PPU
+                # (matches ppu-native PPUPlatform.apply_config_platform_defaults)
+                attention_config.flash_attn_max_num_splits_for_cuda_graph = 0
+
     @classmethod
     def get_attn_backend_cls(
         cls,

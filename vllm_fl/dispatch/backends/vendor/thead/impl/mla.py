@@ -4,20 +4,28 @@
 # Thead (T-Head / PPU) FlashMLA backend.
 #
 # This module patches vLLM's FlashMLA support to work on PPU accelerators
-# by using the flash_mla wheel (torch.ops.flash_mla.*) instead of the
-# natively-compiled vllm._flashmla_C extension which is not available.
+# by using the flash_mla wheel (v2.0.0+ppu2.1.0, torch.ops / flash_mla_cuda)
+# instead of the natively-compiled vllm._flashmla_C / vllm._flashmla_extension_C
+# extensions which are not available in the empty vLLM build.
 #
-# At module load time we:
-#   1. Import flash_mla to register its custom ops.
-#   2. Alias torch.ops._flashmla_C -> torch.ops.flash_mla so that vLLM's
-#      existing flashmla code paths can resolve the ops.
-#   3. Patch the vllm.v1.attention.ops.flashmla module to mark flashmla as
-#      available and replace stub functions with real ones from the wheel.
-#   4. Patch is_flashmla_dense_supported / is_flashmla_sparse_supported to
-#      return True on PPU.
-#   5. Patch FlashMLABackend.supports_compute_capability to allow CC 8.0
-#   6. Inject pure-PyTorch concat_and_cache_mla fallback into _custom_ops
-#      for the vendor (thead) attention backend path.
+# vLLM 0.24.0 non-FP8 calling convention (verified):
+#   scheduler_metadata, _ = get_mla_metadata(seq_lens, num_q_tokens_per_head_k,
+#                                            1, is_fp8_kvcache=False)
+#   o, lse = flash_mla_with_kvcache(q=..., k_cache=..., block_table=...,
+#                                   cache_seqlens=..., head_dim_v=kv_lora_rank,
+#                                   tile_scheduler_metadata=<FlashMLASchedMeta>,
+#                                   softmax_scale=..., causal=True,
+#                                   is_fp8_kvcache=False)
+# The ppu2.1.0 wheel matches this exactly: get_mla_metadata returns an empty
+# FlashMLASchedMeta (initialized lazily on first call) and
+# flash_mla_with_kvcache ASSERTS isinstance(tile_scheduler_metadata,
+# FlashMLASchedMeta) and num_splits is None.  Hence we bind the wheel
+# functions DIRECTLY — the old vLLM 0.20.2 bridge that unpacked the sched
+# meta into raw tensors would crash against the new wheel.
+#
+# FP8 MLA (get_mla_metadata_dense_fp8 / flash_mla_with_kvcache_fp8 ->
+# torch.ops._flashmla_extension_C) is NOT supported on PPU; only bf16/fp16
+# KV cache (is_fp8_kvcache=False) works.
 
 from __future__ import annotations
 
@@ -27,92 +35,33 @@ import torch
 # Step 1 — load the flash_mla wheel to register its custom ops
 # ---------------------------------------------------------------------------
 import flash_mla  # noqa: F401  — registers torch.ops.flash_mla.*
-import flash_mla.flash_mla_interface  # noqa: F401  — real functions
+import flash_mla.flash_mla_interface as _flashmla_wheel
 
 print("DEBUG [thead/mla.py]: flash_mla wheel imported OK", flush=True)
 
 # ---------------------------------------------------------------------------
-# Step 2 — alias torch.ops._flashmla_C -> torch.ops.flash_mla
-# ---------------------------------------------------------------------------
-torch.ops._flashmla_C = torch.ops.flash_mla
-
-# ---------------------------------------------------------------------------
-# Step 3 — patch the flashmla ops module on the remote
+# Step 2 — patch the flashmla ops module on the remote
 # ---------------------------------------------------------------------------
 import vllm.v1.attention.ops.flashmla as _flashmla_ops_mod
 
-# Mark flashmla as available so vLLM uses real implementations
+# Mark flashmla as available so vLLM uses the real implementations
 _flashmla_ops_mod._flashmla_C_AVAILABLE = True
 
-# Replace stub functions with real ones from the wheel
-# BUT: wheel and vLLM have different calling conventions for
-# flash_mla_with_kvcache — vLLM may pass tile_scheduler_metadata as a
-# FlashMLASchedMeta object (non-FP8 path) that bundles both
-# tile_scheduler_metadata and num_splits, while the wheel expects them
-# as two separate arguments.  We provide a bridge wrapper.
-_flashmla_wheel_impl = flash_mla.flash_mla_interface.flash_mla_with_kvcache
-
-
-def _thead_flash_mla_with_kvcache(
-    q: torch.Tensor,
-    k_cache: torch.Tensor,
-    block_table: torch.Tensor,
-    cache_seqlens: torch.Tensor,
-    head_dim_v: int,
-    tile_scheduler_metadata: object,
-    num_splits: object = None,   # optional, may be baked into metadata
-    softmax_scale: float | None = None,
-    causal: bool = False,
-    is_fp8_kvcache: bool = False,
-    indices: torch.Tensor | None = None,
-    **kwargs: object,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Bridge between vLLM and wheel calling conventions.
-
-    vLLM may call flash_mla_with_kvcache in two ways:
-    1. FP8 path: passes tile_scheduler_metadata and num_splits as separate args
-    2. Non-FP8 path: passes a FlashMLASchedMeta object as tile_scheduler_metadata
-       (no explicit num_splits) — need to extract both fields.
-    """
-    if num_splits is None:
-        # Non-FP8 path: tile_scheduler_metadata is a FlashMLASchedMeta
-        _meta = tile_scheduler_metadata
-        if hasattr(_meta, "tile_scheduler_metadata") and hasattr(_meta, "num_splits"):
-            tile_scheduler_metadata = _meta.tile_scheduler_metadata
-            num_splits = _meta.num_splits
-        else:
-            num_splits = torch.tensor(0, device=q.device, dtype=torch.int32)
-
-    # Wheel kernel enforces kMaxSplits (typically 64).  vLLM's metadata
-    # builder may produce larger values depending on cache lengths.
-    if isinstance(num_splits, torch.Tensor) and num_splits.numel() > 0:
-        num_splits = num_splits.clamp(max=63)
-
-    return _flashmla_wheel_impl(
-        q=q,
-        k_cache=k_cache,
-        block_table=block_table,
-        cache_seqlens=cache_seqlens,
-        head_dim_v=head_dim_v,
-        tile_scheduler_metadata=tile_scheduler_metadata,
-        num_splits=num_splits,
-        softmax_scale=softmax_scale,
-        causal=causal,
-        is_fp8_kvcache=is_fp8_kvcache,
-        indices=indices,
-    )
-
-
-_flashmla_ops_mod.flash_mla_with_kvcache = _thead_flash_mla_with_kvcache
-_flashmla_ops_mod.get_mla_metadata = flash_mla.flash_mla_interface.get_mla_metadata
-_flashmla_ops_mod.flash_mla_sparse_fwd = flash_mla.flash_mla_interface.flash_mla_sparse_fwd
-_flashmla_ops_mod.FlashMLASchedMeta = flash_mla.flash_mla_interface.FlashMLASchedMeta
+# Bind the wheel implementations DIRECTLY (vLLM 0.24.0 non-FP8 convention
+# matches the ppu2.1.0 wheel; no bridge wrapper needed).
+_flashmla_ops_mod.flash_mla_with_kvcache = (
+    _flashmla_wheel.flash_mla_with_kvcache
+)
+_flashmla_ops_mod.get_mla_metadata = _flashmla_wheel.get_mla_metadata
+_flashmla_ops_mod.flash_mla_sparse_fwd = _flashmla_wheel.flash_mla_sparse_fwd
+_flashmla_ops_mod.FlashMLASchedMeta = _flashmla_wheel.FlashMLASchedMeta
 
 print("DEBUG [thead/mla.py]: flashmla ops patched OK", flush=True)
 
 # ---------------------------------------------------------------------------
-# Step 4 — patch is_flashmla_dense_supported / sparse_supported for PPU
+# Step 3 — patch is_flashmla_dense_supported / sparse_supported for PPU
 # ---------------------------------------------------------------------------
+
 
 def _thead_is_flashmla_dense_supported():
     return True, None
@@ -125,17 +74,30 @@ def _thead_is_flashmla_sparse_supported():
 _flashmla_ops_mod.is_flashmla_dense_supported = _thead_is_flashmla_dense_supported
 _flashmla_ops_mod.is_flashmla_sparse_supported = _thead_is_flashmla_sparse_supported
 
-# Important: also patch the backend module's namespace because flashmla.py
-# does "from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported"
-# at module level — reassigning the ops module's attribute is not enough.
+# The backend modules do "from vllm.v1.attention.ops.flashmla import ..." at
+# module level — patching the ops module attribute is enough when the backend
+# is imported after this module (it is: backend classes resolve lazily at
+# attention selection).  Patch the backend namespaces defensively anyway.
 import vllm.v1.attention.backends.mla.flashmla as _flashmla_backend_mod
-_flashmla_backend_mod.is_flashmla_dense_supported = _thead_is_flashmla_dense_supported
+
+_flashmla_backend_mod.is_flashmla_dense_supported = (
+    _thead_is_flashmla_dense_supported
+)
+_flashmla_backend_mod.flash_mla_with_kvcache = (
+    _flashmla_wheel.flash_mla_with_kvcache
+)
+_flashmla_backend_mod.get_mla_metadata = _flashmla_wheel.get_mla_metadata
+_flashmla_backend_mod.FlashMLASchedMeta = _flashmla_wheel.FlashMLASchedMeta
 
 import vllm.v1.attention.backends.mla.flashmla_sparse as _flashmla_sparse_mod
-_flashmla_sparse_mod.is_flashmla_sparse_supported = _thead_is_flashmla_sparse_supported
+
+_flashmla_sparse_mod.is_flashmla_sparse_supported = (
+    _thead_is_flashmla_sparse_supported
+)
+_flashmla_sparse_mod.flash_mla_sparse_fwd = _flashmla_wheel.flash_mla_sparse_fwd
 
 # ---------------------------------------------------------------------------
-# Step 5 — patch FlashMLABackend.supports_compute_capability for CC 8.0
+# Step 4 — patch FlashMLABackend.supports_compute_capability for CC 8.0
 # ---------------------------------------------------------------------------
 from vllm.v1.attention.backends.mla.flashmla import FlashMLABackend
 from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseBackend
@@ -153,13 +115,18 @@ FlashMLASparseBackend.supports_compute_capability = classmethod(_thead_flashmla_
 print("DEBUG [thead/mla.py]: FlashMLABackend patched for CC 8.0 OK", flush=True)
 
 # ---------------------------------------------------------------------------
-# Step 6 — pure-PyTorch concat_and_cache_mla fallback for vendor (thead) path
+# Step 5 — pure-PyTorch concat_and_cache_mla fallback for vendor (thead) path
 # ---------------------------------------------------------------------------
 # When the dispatch system selects the vendor (thead) attention backend,
-# FlashMLABackendImpl.do_kv_cache_update() calls ops.concat_and_cache_mla()
-# which resolves to torch.ops._C_cache_ops.concat_and_cache_mla.
-# If the native CUDA op is not available on this platform, inject a
-# pure-PyTorch alternative via _custom_ops as a fallback.
+# MLACommonAttentionImpl.do_kv_cache_update() calls ops.concat_and_cache_mla()
+# which resolves to torch.ops._C_cache_ops.concat_and_cache_mla in vLLM's
+# _custom_ops.  If the native CUDA op is not available on this platform,
+# inject a pure-PyTorch alternative via _custom_ops as a fallback.
+#
+# vLLM 0.24.0 call signature (vllm/v1/attention/backend.py):
+#   ops.concat_and_cache_mla(kv_c, k_pe.squeeze(1), kv_cache,
+#                            slot_mapping.flatten(), kv_cache_dtype=...,
+#                            scale=...)
 
 _concat_and_cache_mla_cuda_available = False
 try:
@@ -240,6 +207,7 @@ def _thead_concat_and_cache_mla(
 # Inject into _custom_ops so that the vendor attention backend's
 # do_kv_cache_update can find it via ops.concat_and_cache_mla().
 import vllm._custom_ops as _custom_ops_mod
+
 _custom_ops_mod.concat_and_cache_mla = _thead_concat_and_cache_mla
 
 print(
