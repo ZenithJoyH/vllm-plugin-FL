@@ -39,6 +39,39 @@ def register_builtins(registry) -> None:
     is_avail = backend.is_available
 
     impls = [
+        OpImpl(
+            op_name="mla_prefill",
+            impl_id="default.flagos",
+            kind=BackendImplKind.DEFAULT,
+            fn=_bind_is_available(backend.mla_prefill, is_avail),
+            vendor=None,
+            priority=BackendPriority.DEFAULT,
+        ),
+        # BF16 indexer graph operators
+        OpImpl(
+            op_name="bf16_indexer_cache_write",
+            impl_id="default.flagos",
+            kind=BackendImplKind.DEFAULT,
+            fn=_bind_is_available(backend.bf16_indexer_cache_write, is_avail),
+            vendor=None,
+            priority=BackendPriority.DEFAULT,
+        ),
+        OpImpl(
+            op_name="bf16_paged_mqa_logits",
+            impl_id="default.flagos",
+            kind=BackendImplKind.DEFAULT,
+            fn=_bind_is_available(backend.bf16_paged_mqa_logits, is_avail),
+            vendor=None,
+            priority=BackendPriority.DEFAULT,
+        ),
+        OpImpl(
+            op_name="bf16_indexer_topk",
+            impl_id="default.flagos",
+            kind=BackendImplKind.DEFAULT,
+            fn=_bind_is_available(backend.bf16_indexer_topk, is_avail),
+            vendor=None,
+            priority=BackendPriority.DEFAULT,
+        ),
         # Quantization
         OpImpl(
             op_name="dynamic_per_token_quant_int8",

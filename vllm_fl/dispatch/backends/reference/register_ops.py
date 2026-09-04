@@ -37,6 +37,23 @@ def register_builtins(registry) -> None:
     is_avail = backend.is_available
 
     impls = [
+        # BF16 indexer reference fallbacks
+        OpImpl(
+            op_name="bf16_indexer_cache_write",
+            impl_id="reference.torch",
+            kind=BackendImplKind.REFERENCE,
+            fn=_bind_is_available(backend.bf16_indexer_cache_write, is_avail),
+            vendor=None,
+            priority=BackendPriority.REFERENCE,
+        ),
+        OpImpl(
+            op_name="bf16_paged_mqa_logits",
+            impl_id="reference.torch",
+            kind=BackendImplKind.REFERENCE,
+            fn=_bind_is_available(backend.bf16_paged_mqa_logits, is_avail),
+            vendor=None,
+            priority=BackendPriority.REFERENCE,
+        ),
         # Quantization
         OpImpl(
             op_name="dynamic_per_token_quant_int8",
