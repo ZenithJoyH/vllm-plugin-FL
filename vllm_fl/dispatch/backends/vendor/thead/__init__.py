@@ -1,11 +1,14 @@
 # Copyright (c) 2026 BAAI. All rights reserved.
 
-"""
-Thead backend for vllm-plugin-FL dispatch.
-
-This backend provides operator implementations for T-Head PPU accelerators.
-"""
-
-from .thead import TheadBackend
+"""T-Head backend exports, kept lazy for early native-schema initialization."""
 
 __all__ = ["TheadBackend"]
+
+
+def __getattr__(name: str):
+    if name == "TheadBackend":
+        from .thead import TheadBackend
+
+        globals()[name] = TheadBackend
+        return TheadBackend
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
