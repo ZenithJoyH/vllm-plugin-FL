@@ -26,13 +26,6 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
 )
 
 
-def _flaggems_fused_experts_impl(**kwargs) -> torch.Tensor:
-    """Resolve FlagGems lazily after the platform runtime is initialized."""
-    import flag_gems
-
-    return flag_gems.fused_experts_impl(**kwargs)
-
-
 def _validate_w8a8_contract(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -248,7 +241,9 @@ class FlagGemsW8A8Experts(TritonExperts):
             quant_config.w2_bias,
         )
 
-        result = _flaggems_fused_experts_impl(
+        import flag_gems
+
+        result = flag_gems.fused_experts_impl(
             hidden_states=hidden_states,
             w1=w1,
             w2=w2,
