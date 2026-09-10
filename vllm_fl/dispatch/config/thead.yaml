@@ -55,6 +55,23 @@ op_backends:
     - vendor
     - reference
 
+  # Bounded activation and hyperconnection capabilities.
+  silu_and_mul_with_clamp: [flagos, reference]
+  mhc_pre_with_norm: [flagos, reference]
+  mhc_post: [flagos, reference]
+  mhc_fused_post_pre_with_norm: [flagos, reference]
+
+  # Sequence-model kernels are implemented by FlagGems. Cache/state writers use
+  # a single backend so a runtime failure can never replay a partial mutation.
+  causal_conv1d_update: [flagos]
+  fused_recurrent_kda: [flagos]
+  fused_safe_kda_gate: [flagos]
+  sparse_indexer_gather_cache: [flagos]
+  sparse_indexer_paged_mqa_logits: [flagos]
+  sparse_indexer_persist_prefill_tail: [flagos]
+  sparse_indexer_kpool_compress_and_write_cache: [flagos]
+  sparse_indexer_kpool_decode_update_and_maybe_write_cache_batched: [flagos]
+
 # FlagOS operator blacklist
 flagos_blacklist:
   - to_copy

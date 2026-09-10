@@ -1,10 +1,6 @@
 # Copyright (c) 2026 BAAI. All rights reserved.
 
-"""
-Reference backend operator registrations.
-
-This module registers all REFERENCE (PyTorch) implementations.
-"""
+"""Reference backend operator registrations."""
 
 from __future__ import annotations
 
@@ -16,7 +12,7 @@ from vllm_fl.dispatch.types import BackendImplKind, BackendPriority, OpImpl
 
 
 def _bind_is_available(fn, is_available_fn):
-    """Wrap a function and bind _is_available attribute for OpImpl.is_available() check."""
+    """Wrap a function and bind _is_available for OpImpl."""
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
@@ -53,17 +49,11 @@ def _reference_impl(op_name, module, symbol, is_available):
 
 
 def register_builtins(registry) -> None:
-    """
-    Register all PyTorch (REFERENCE) operator implementations.
-
-    Args:
-        registry: Registry to register into
-    """
+    """Register PyTorch reference implementations."""
     from .reference import ReferenceBackend
 
     backend = ReferenceBackend()
     is_avail = backend.is_available
-
     # ReferenceBackend implements only part of the dispatch surface on some
     # vLLM 0.24 builds. One absent optional MoE helper must not prevent all
     # available PyTorch fallbacks from registering.
@@ -99,8 +89,29 @@ def register_builtins(registry) -> None:
         )
 
     capability_ops = {
+        "mhc_pre_with_norm": ("mhc", "mhc_pre"),
+        "mhc_post": ("mhc", "mhc_post"),
+        "mhc_fused_post_pre_with_norm": ("mhc", "mhc_fused_post_pre"),
+        "silu_and_mul_with_clamp": ("activation", "silu_and_mul_with_clamp"),
+        "causal_conv1d_fn": ("causal_conv1d", "causal_conv1d_fn"),
+        "chunk_kda_with_safe_gate": ("kda", "chunk_kda_with_safe_gate"),
+        "sparse_indexer_rotate_indexer_query": (
+            "sparse_indexer",
+            "rotate_indexer_query",
+        ),
+        "sparse_indexer_mqa_logits": ("sparse_indexer", "_torch_mqa_logits"),
         "top_k_per_row_prefill": ("top_k_per_row", "top_k_per_row_prefill"),
         "top_k_per_row_decode": ("top_k_per_row", "top_k_per_row_decode"),
+        "sparse_indexer_pack_seq": ("sparse_indexer", "_torch_pack_seq"),
+        "sparse_indexer_unpack_seq": ("sparse_indexer", "_torch_unpack_seq"),
+        "sparse_indexer_expand_pools_to_tokens": (
+            "sparse_indexer",
+            "expand_pools_to_tokens",
+        ),
+        "sparse_indexer_append_tail_to_topk": (
+            "sparse_indexer",
+            "append_tail_to_topk",
+        ),
     }
     for op_name, (module_name, symbol) in capability_ops.items():
         impls.append(
@@ -111,5 +122,4 @@ def register_builtins(registry) -> None:
                 is_avail,
             )
         )
-
     registry.register_many(impls)

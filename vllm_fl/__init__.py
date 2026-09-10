@@ -217,6 +217,10 @@ def register_model():
 
     patch_vllm_moe_sum()
 
+    from vllm_fl.patches.glm5next import apply_glm5next_patches
+
+    apply_glm5next_patches()
+
     _register_flagcx_connector()
 
     # Register OOT quant kernels so kernel selection can find them

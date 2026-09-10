@@ -5,12 +5,14 @@ from vllm_fl.dispatch import CachedOp
 
 _silu_and_mul = CachedOp("silu_and_mul")
 _gelu_and_mul = CachedOp("gelu_and_mul")
+_silu_and_mul_with_clamp = CachedOp("silu_and_mul_with_clamp")
 
 
 def apply_moe_activation(
     activation: MoEActivation,
     output: torch.Tensor,
     input: torch.Tensor,
+    clamp_limit: float | None = None,
 ) -> torch.Tensor:
     """Apply MoE activation function."""
     assert input.dim() == 2, "Input must be 2D"
@@ -28,7 +30,10 @@ def apply_moe_activation(
 
     # Activations with gated multiplication (gate × activation(up))
     if activation == MoEActivation.SILU:
-        output.copy_(_silu_and_mul(None, input))
+        if clamp_limit is None:
+            output.copy_(_silu_and_mul(None, input))
+        else:
+            output.copy_(_silu_and_mul_with_clamp(input, clamp_limit))
     elif activation == MoEActivation.GELU:
         output.copy_(_gelu_and_mul(None, input))
     elif activation == MoEActivation.SWIGLUOAI:
