@@ -5,6 +5,10 @@ from __future__ import annotations
 
 import torch
 
+_NATIVE_ATEN_KEYSET = torch._C.DispatchKeySet(
+    torch._C.DispatchKey.CompositeExplicitAutograd
+)
+
 
 def _validate_cache_write(keys, cache, slot_mapping):
     if keys.ndim != 2 or cache.ndim != 3 or slot_mapping.ndim != 1:
@@ -140,6 +144,25 @@ def _bf16_indexer_topk_flaggems(
     )
 
 
+def _native_candidate_order(candidate_logits: torch.Tensor) -> torch.Tensor:
+    """Sort candidates without re-entering FlagGems' global ATen topk.
+
+    The candidate width follows the decode length.  FlagGems specializes its
+    generic topk kernel on both ``N`` and ``k``, so dispatching through
+    ``torch.topk`` here compiles a new full-sort kernel for every decode step.
+    Redispatch to ATen's native implementation for this final ordering only;
+    the FlagGems fused candidate-selection kernel remains in use.
+    """
+    return torch.ops.aten.topk.default.redispatch(
+        _NATIVE_ATEN_KEYSET,
+        candidate_logits,
+        candidate_logits.shape[1],
+        -1,
+        True,
+        True,
+    )[1]
+
+
 def bf16_indexer_decode_flaggems(
     q: torch.Tensor,
     cache: torch.Tensor,
@@ -174,13 +197,7 @@ def bf16_indexer_decode_flaggems(
     candidate_positions = indices.clamp_min(0).to(torch.int64)
     candidate_logits = torch.gather(logits, 1, candidate_positions)
     candidate_logits.masked_fill_(indices < 0, float("-inf"))
-    candidate_order = torch.topk(
-        candidate_logits,
-        indices.shape[1],
-        dim=-1,
-        largest=True,
-        sorted=True,
-    )[1]
+    candidate_order = _native_candidate_order(candidate_logits)
     indices.copy_(torch.gather(indices, 1, candidate_order))
 
 
