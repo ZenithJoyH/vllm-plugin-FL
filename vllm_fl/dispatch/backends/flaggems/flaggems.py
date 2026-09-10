@@ -8,10 +8,10 @@ This backend provides operator implementations using the FlagGems library.
 
 from __future__ import annotations
 
-from typing import Optional, Union
+import os
+from typing import ClassVar, Optional, Union
 
 import torch
-import os
 
 from vllm_fl.dispatch.backends.base import Backend
 
@@ -25,6 +25,7 @@ class FlagGemsBackend(Backend):
     """
 
     _available: Optional[bool] = None
+    _fused_op_availability: ClassVar[dict[str, bool]] = {}
 
     @property
     def name(self) -> str:
@@ -40,6 +41,18 @@ class FlagGemsBackend(Backend):
             except ImportError:
                 FlagGemsBackend._available = False
         return FlagGemsBackend._available
+
+    def fused_op_is_available(self, op_name: str) -> bool:
+        """Check one optional FlagGems fused operator without coupling ABIs."""
+        if op_name not in FlagGemsBackend._fused_op_availability:
+            try:
+                from flag_gems import fused
+
+                available = callable(getattr(fused, op_name, None))
+            except ImportError:
+                available = False
+            FlagGemsBackend._fused_op_availability[op_name] = available
+        return FlagGemsBackend._fused_op_availability[op_name]
 
     # ==================== Operator Implementations ====================
 
@@ -78,6 +91,56 @@ class FlagGemsBackend(Backend):
         from .impl.bf16_indexer import bf16_indexer_decode_flaggems
 
         bf16_indexer_decode_flaggems(*args, **kwargs)
+
+    def qsa_mqa_paged(self, *args, **kwargs):
+        from flag_gems.fused import qsa_mqa_paged
+
+        return qsa_mqa_paged(*args, **kwargs)
+
+    def expand_qsa_block_indices(self, *args, **kwargs):
+        from flag_gems.fused import expand_qsa_block_indices
+
+        return expand_qsa_block_indices(*args, **kwargs)
+
+    def qsa_select_paged_tokens(self, *args, **kwargs):
+        from flag_gems.fused import qsa_select_paged_tokens
+
+        return qsa_select_paged_tokens(*args, **kwargs)
+
+    def qsa_sparse_paged_attention(self, *args, **kwargs):
+        from flag_gems.fused import qsa_sparse_paged_attention
+
+        return qsa_sparse_paged_attention(*args, **kwargs)
+
+    def qsa_store_cache_rows(self, *args, **kwargs):
+        from flag_gems.fused import qsa_store_cache_rows
+
+        return qsa_store_cache_rows(*args, **kwargs)
+
+    def qsa_compress_groups_with_ratio(self, *args, **kwargs):
+        from flag_gems.fused import qsa_compress_groups_with_ratio
+
+        return qsa_compress_groups_with_ratio(*args, **kwargs)
+
+    def ple_state_gather(self, *args, **kwargs):
+        from flag_gems.fused import ple_state_gather
+
+        return ple_state_gather(*args, **kwargs)
+
+    def ple_state_scatter_(self, *args, **kwargs):
+        from flag_gems.fused import ple_state_scatter_
+
+        return ple_state_scatter_(*args, **kwargs)
+
+    def gdn_packed_decode(self, *args, **kwargs):
+        from flag_gems.fused import gdn_packed_decode
+
+        return gdn_packed_decode(*args, **kwargs)
+
+    def compute_common_slot_mapping(self, *args, **kwargs):
+        from .impl.common_slot_mapping import compute_common_slot_mapping_flaggems
+
+        return compute_common_slot_mapping_flaggems(*args, **kwargs)
 
     def silu_and_mul(self, obj, x: torch.Tensor) -> torch.Tensor:
         """
