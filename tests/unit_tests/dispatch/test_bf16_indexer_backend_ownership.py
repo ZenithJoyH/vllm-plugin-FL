@@ -33,7 +33,7 @@ def test_flaggems_decode_owns_candidate_ordering(
         assert next_n == 1
         indices.copy_(torch.tensor([candidate_indices], dtype=torch.int32))
 
-    monkeypatch.setattr(module, "_bf16_indexer_topk_flaggems", fake_topk)
+    monkeypatch.setattr(module, "top_k_per_row_decode", fake_topk)
 
     def reject_global_topk(*args, **kwargs):
         raise AssertionError("candidate ordering must not re-enter global torch.topk")

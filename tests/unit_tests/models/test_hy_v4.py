@@ -5,9 +5,34 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import torch
 from torch import nn
 
 from vllm_fl.models import hy_v4
+
+
+def test_hy4_prefill_topk_uses_shared_capability(monkeypatch):
+    captured = {}
+
+    def fake_topk(logits, row_starts, row_ends, indices):
+        captured["logits"] = logits.clone()
+        captured["row_starts"] = row_starts.clone()
+        captured["row_ends"] = row_ends.clone()
+        indices.fill_(-1)
+        indices[0, :2].copy_(torch.tensor([2, 0], dtype=torch.int32))
+
+    monkeypatch.setattr(hy_v4, "_top_k_per_row_prefill", fake_topk)
+    q = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+    weights = torch.tensor([1.0, 2.0])
+    keys = torch.tensor([[1.0, 1.0], [2.0, -1.0], [3.0, 4.0]])
+    output = torch.empty(4, dtype=torch.int32)
+
+    hy_v4._select_topk(q, weights, keys, topk=4, output=output)
+
+    assert captured["logits"].shape == (1, 3)
+    assert captured["row_starts"].tolist() == [0]
+    assert captured["row_ends"].tolist() == [3]
+    assert output.tolist() == [2, 0, -1, -1]
 
 
 class _FakeGate(nn.Module):

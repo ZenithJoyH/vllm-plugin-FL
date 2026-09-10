@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import torch
 
+from .top_k_per_row import _decode_row_lengths, top_k_per_row_decode
+
 
 def bf16_indexer_cache_write_torch(
     keys: torch.Tensor,
@@ -40,17 +42,6 @@ def bf16_indexer_cache_write_torch(
     )
 
 
-def _flatten_decode_seq_lens(
-    seq_lens: torch.Tensor, batch_size: int, next_n: int
-) -> torch.Tensor:
-    flat_lens = seq_lens.reshape(-1)
-    if flat_lens.numel() == batch_size and next_n > 1:
-        offsets = torch.arange(next_n, device=seq_lens.device, dtype=seq_lens.dtype)
-        offsets = offsets - (next_n - 1)
-        flat_lens = (flat_lens[:, None] + offsets[None, :]).clamp_min(0).reshape(-1)
-    return flat_lens
-
-
 def _bf16_paged_mqa_logits_torch(
     q: torch.Tensor,
     cache: torch.Tensor,
@@ -84,7 +75,7 @@ def _bf16_paged_mqa_logits_torch(
         raise ValueError("BF16 paged-MQA query/cache head dimensions must match")
     flat_q = q.reshape(-1, num_heads, head_dim)
     flat_weights = weights.reshape(-1, num_heads)
-    flat_lens = _flatten_decode_seq_lens(seq_lens, batch_size, next_n)
+    flat_lens = _decode_row_lengths(seq_lens, flat_q.shape[0], next_n)
     if flat_lens.numel() != flat_q.shape[0]:
         raise ValueError(
             "BF16 paged-MQA sequence lengths must contain one value per request or "
@@ -138,18 +129,7 @@ def bf16_indexer_decode_torch(
     if indices.shape[0] != logits.shape[0]:
         raise ValueError("logits and indices must have the same number of rows")
 
-    batch_size = q.shape[0]
-    flat_lens = _flatten_decode_seq_lens(seq_lens, batch_size, next_n)
-    if flat_lens.numel() != logits.shape[0]:
-        raise ValueError("sequence lengths must resolve to one value per logit row")
-    indices.fill_(-1)
-    for row in range(logits.shape[0]):
-        valid_len = min(int(flat_lens[row].item()), logits.shape[1])
-        count = min(indices.shape[1], valid_len)
-        if count:
-            indices[row, :count].copy_(
-                torch.topk(logits[row, :valid_len], count, sorted=True).indices
-            )
+    top_k_per_row_decode(logits, seq_lens, indices, next_n=next_n)
 
 
 __all__ = [

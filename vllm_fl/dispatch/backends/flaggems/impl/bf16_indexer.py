@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import torch
 
+from .top_k_per_row import top_k_per_row_decode
+
 _NATIVE_ATEN_KEYSET = torch._C.DispatchKeySet(
     torch._C.DispatchKey.CompositeExplicitAutograd
 )
@@ -91,59 +93,6 @@ def _bf16_paged_mqa_logits_flaggems(
     )
 
 
-def _bf16_indexer_topk_flaggems(
-    logits: torch.Tensor,
-    seq_lens: torch.Tensor,
-    indices: torch.Tensor,
-    *,
-    next_n: int,
-) -> None:
-    """Select decode Indexer candidates with FlagGems' row-wise kernel.
-
-    Unlike ``torch.topk(logits, ...)``, the FlagGems kernel reads the valid
-    length of each request and does not scan the model-length ``-inf`` tail.
-    ``indices`` is caller-owned so its address remains stable during graph
-    capture and replay.
-    """
-    from flag_gems.fused import top_k_per_row_decode
-
-    if logits.ndim != 2 or logits.dtype != torch.float32:
-        raise ValueError("BF16 Indexer top-k expects FP32 logits [rows, width]")
-    if indices.ndim != 2 or indices.dtype != torch.int32:
-        raise ValueError("BF16 Indexer top-k expects INT32 indices [rows, top_k]")
-    if logits.shape[0] != indices.shape[0]:
-        raise ValueError("logits and indices must have the same number of rows")
-    if logits.device != seq_lens.device or logits.device != indices.device:
-        raise ValueError("logits, seq_lens and indices must share a device")
-    if seq_lens.dtype != torch.int32:
-        raise TypeError("seq_lens must be int32")
-    if next_n <= 0 or logits.shape[0] % next_n:
-        raise ValueError("next_n must divide the number of logit rows")
-    if seq_lens.ndim == 2:
-        if seq_lens.shape != (logits.shape[0] // next_n, next_n):
-            raise ValueError("2D seq_lens must have shape [batch, next_n]")
-        # FlagGems derives the per-token lengths from each request's final
-        # length. Materialize a contiguous 1D view for its current ABI.
-        kernel_seq_lens = seq_lens[:, -1].contiguous()
-    elif seq_lens.ndim == 1:
-        if seq_lens.shape[0] != logits.shape[0] // next_n:
-            raise ValueError("1D seq_lens must have one value per request")
-        kernel_seq_lens = seq_lens.contiguous()
-    else:
-        raise ValueError("seq_lens must be 1D or 2D")
-
-    top_k_per_row_decode(
-        logits,
-        next_n,
-        kernel_seq_lens,
-        indices,
-        logits.shape[0],
-        logits.stride(0),
-        logits.stride(1),
-        indices.shape[1],
-    )
-
-
 def _native_candidate_order(candidate_logits: torch.Tensor) -> torch.Tensor:
     """Sort candidates without re-entering FlagGems' global ATen topk.
 
@@ -192,7 +141,7 @@ def bf16_indexer_decode_flaggems(
         max_context_len=max_context_len,
         clean_logits=clean_logits,
     )
-    _bf16_indexer_topk_flaggems(logits, seq_lens, indices, next_n=next_n)
+    top_k_per_row_decode(logits, seq_lens, indices, next_n=next_n)
 
     candidate_positions = indices.clamp_min(0).to(torch.int64)
     candidate_logits = torch.gather(logits, 1, candidate_positions)

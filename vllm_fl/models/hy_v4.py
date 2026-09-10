@@ -82,6 +82,9 @@ _indexer_cache_write = CachedOp("bf16_indexer_cache_write")
 _indexer_decode = CachedOp("bf16_indexer_decode")
 
 
+_top_k_per_row_prefill = CachedOp("top_k_per_row_prefill")
+
+
 def _paged_sequence(
     kv_cache: torch.Tensor,
     block_table: torch.Tensor,
@@ -116,9 +119,16 @@ def _select_topk(
     # ahead of ReLU changes the selected tokens when individual heads disagree.
     scores = torch.matmul(keys, q.transpose(0, 1))
     logits = (torch.relu(scores) * weights.to(scores.dtype).unsqueeze(0)).sum(dim=-1)
-    count = min(topk, keys.shape[0])
-    indices = torch.topk(logits, count, dim=-1, largest=True, sorted=True)[1]
-    output[:count].copy_(indices.to(output.dtype))
+    row_starts = torch.zeros_like(output[:1])
+    row_ends = torch.full_like(output[:1], keys.shape[0])
+    # Sparse attention consumes the selected positions as a set, so provider
+    # implementations need not return them in descending-score order.
+    _top_k_per_row_prefill(
+        logits.unsqueeze(0),
+        row_starts,
+        row_ends,
+        output[:topk].unsqueeze(0),
+    )
 
 
 def _hyv4_bf16_sparse_attn_indexer_impl(
