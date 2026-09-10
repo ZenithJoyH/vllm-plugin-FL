@@ -24,9 +24,7 @@ def test_hy4_prefill_topk_uses_shared_capability(monkeypatch):
     monkeypatch.setattr(hy_v4, "_top_k_per_row_prefill", fake_topk)
     q = torch.tensor([[1.0, 0.0], [0.0, 1.0]], dtype=torch.bfloat16)
     weights = torch.tensor([1.0, 2.0], dtype=torch.bfloat16)
-    keys = torch.tensor(
-        [[1.0, 1.0], [2.0, -1.0], [3.0, 4.0]], dtype=torch.bfloat16
-    )
+    keys = torch.tensor([[1.0, 1.0], [2.0, -1.0], [3.0, 4.0]], dtype=torch.bfloat16)
     output = torch.empty(4, dtype=torch.int32)
 
     hy_v4._select_topk(q, weights, keys, topk=4, output=output)
