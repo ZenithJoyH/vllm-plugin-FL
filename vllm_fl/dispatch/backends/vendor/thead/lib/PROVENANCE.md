@@ -1,6 +1,13 @@
 # T-Head PPU native extension provenance
 
-These binaries are copied byte-for-byte from:
+The optional native bundle is not tracked in Git and is not included in the
+Python wheel. A deployment that opts into these kernels must provision all
+three files in one directory and set the absolute path in
+`VLLM_FL_THEAD_NATIVE_LIB_DIR`. Without a complete bundle, the plugin emits one
+warning per process and continues through its configured FlagGems/reference
+fallbacks. ABI or dependency load failures remain fatal.
+
+The bundle validated for the environment below was copied byte-for-byte from:
 
 - image tag: `egslingjun-registry.cn-wulanchabu.cr.aliyuncs.com/egslingjun/inference-xpu-pytorch:26.04-v2.1.0-vllm0.23.0-torch2.10-cu130-20260710`
 - immutable digest: `sha256:fb48fe779ca7b91741b0248cf6cda4ab3785c69dd91dfe88890c7cafdc2996ac`

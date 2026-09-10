@@ -1,15 +1,16 @@
 # Copyright (c) 2026 BAAI. All rights reserved.
 
-"""Lazy loader and narrow wrappers for T-Head PPU native extensions.
+"""Lazy loader and narrow wrappers for optional T-Head PPU extensions.
 
-The bundled binaries are loaded only after the T-Head backend has been chosen,
-so importing vllm-plugin-FL on another platform never registers PPU kernels.
+The externally provisioned binaries are loaded during T-Head platform
+initialization, before portable fallback schemas can claim the same operators.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
 import math
+import os
+from pathlib import Path
 import sys
 from threading import Lock
 from types import ModuleType
@@ -17,7 +18,8 @@ from types import ModuleType
 import torch
 
 
-_LIB_DIR = Path(__file__).resolve().parent.parent / "lib"
+_DEFAULT_LIB_DIR = Path(__file__).resolve().parent.parent / "lib"
+_LIB_DIR_ENV = "VLLM_FL_THEAD_NATIVE_LIB_DIR"
 _FILES = {
     "cache": "_C_stable_libtorch.abi3.so",
     "core": "_C.abi3.so",
@@ -25,6 +27,17 @@ _FILES = {
 }
 _LOADED: set[str] = set()
 _LOAD_LOCK = Lock()
+
+
+def _native_library_directory() -> Path:
+    """Return the configured native-library directory for this process."""
+    configured = os.environ.get(_LIB_DIR_ENV)
+    if configured is None:
+        return _DEFAULT_LIB_DIR
+    directory = Path(configured)
+    if not directory.is_absolute():
+        raise ValueError(f"{_LIB_DIR_ENV} must be an absolute path: {configured!r}")
+    return directory
 
 
 class NativeExtensionBundleMissingError(RuntimeError):
@@ -47,7 +60,7 @@ def load_native_extension(component: str) -> None:
     with _LOAD_LOCK:
         if component in _LOADED:
             return
-        path = _LIB_DIR / _FILES[component]
+        path = _native_library_directory() / _FILES[component]
         if not path.is_file():
             raise NativeExtensionBundleMissingError([path])
         torch.ops.load_library(str(path))
@@ -56,10 +69,11 @@ def load_native_extension(component: str) -> None:
 
 def load_all_native_extensions() -> None:
     """Load the complete, mutually compatible bundle before fallback schemas."""
+    library_directory = _native_library_directory()
     missing = [
-        _LIB_DIR / name
+        library_directory / name
         for name in _FILES.values()
-        if not (_LIB_DIR / name).is_file()
+        if not (library_directory / name).is_file()
     ]
     if missing:
         raise NativeExtensionBundleMissingError(missing)

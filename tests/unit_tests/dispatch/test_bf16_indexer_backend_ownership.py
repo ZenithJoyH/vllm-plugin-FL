@@ -68,8 +68,15 @@ def test_reference_decode_honors_each_valid_length(monkeypatch):
     q = torch.empty((1, 2, 1, 1), dtype=torch.bfloat16)
     indices = torch.empty((2, 3), dtype=torch.int32)
     module.bf16_indexer_decode_torch(
-        q, None, None, torch.tensor([[3, 1]], dtype=torch.int32), None, None, indices,
-        next_n=2, max_context_len=4,
+        q,
+        None,
+        None,
+        torch.tensor([[3, 1]], dtype=torch.int32),
+        None,
+        None,
+        indices,
+        next_n=2,
+        max_context_len=4,
     )
     assert indices.tolist() == [[1, 2, 0], [0, -1, -1]]
 
@@ -93,8 +100,15 @@ def test_flaggems_decode_graph_replay_uses_changed_logits(monkeypatch):
 
     def run():
         module.bf16_indexer_decode_flaggems(
-            None, None, None, seq_lens, None, None, indices,
-            next_n=2, max_context_len=6,
+            None,
+            None,
+            None,
+            seq_lens,
+            None,
+            None,
+            indices,
+            next_n=2,
+            max_context_len=6,
         )
 
     for _ in range(3):
