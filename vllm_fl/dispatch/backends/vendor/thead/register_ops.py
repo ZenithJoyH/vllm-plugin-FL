@@ -1,20 +1,18 @@
 # Copyright (c) 2026 BAAI. All rights reserved.
 
-"""
-Thead (PPU) backend operator registrations.
-
-This module registers VENDOR (thead) implementations for the dispatch system.
-"""
+"""Thead (PPU) backend operator registrations."""
 
 from __future__ import annotations
 
 import functools
+from functools import lru_cache
+from importlib import import_module
 
-from vllm_fl.dispatch.types import OpImpl, BackendImplKind, BackendPriority
+from vllm_fl.dispatch.types import BackendImplKind, BackendPriority, OpImpl
 
 
 def _bind_is_available(fn, is_available_fn):
-    """Wrap a function and bind _is_available attribute for OpImpl."""
+    """Wrap a function and bind _is_available for OpImpl."""
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
@@ -24,95 +22,119 @@ def _bind_is_available(fn, is_available_fn):
     return wrapper
 
 
+def _lazy_attr(resolve_owner, name: str, is_available):
+    resolved_fn = None
+
+    def resolve():
+        nonlocal resolved_fn
+        if resolved_fn is None:
+            resolved_fn = getattr(resolve_owner(), name)
+        return resolved_fn
+
+    def invoke(*args, **kwargs):
+        # Keep graph capture on the import-free, pre-resolved path.
+        fn = resolved_fn
+        if fn is None:
+            fn = resolve()
+        return fn(*args, **kwargs)
+
+    invoke._is_available = is_available
+    invoke._prepare = resolve
+    return invoke
+
+
+def _vendor_impl(op_name, fn):
+    return OpImpl(
+        op_name=op_name,
+        impl_id="vendor.thead",
+        kind=BackendImplKind.VENDOR,
+        fn=fn,
+        vendor="thead",
+        priority=BackendPriority.VENDOR,
+    )
+
+
 def register_builtins(registry) -> None:
-    """
-    Register all thead (PPU) VENDOR operator implementations.
-
-    At registration time we also load the flash_attn_3 wheel so that
-    TheadFlashAttentionBackend can call FA3 ops.
-
-    Args:
-        registry: Registry to register into
-    """
+    """Register Thead PPU implementations."""
     from .thead import TheadBackend
 
     backend = TheadBackend()
     is_avail = backend.is_available
-    cache_ops_available = backend.native_cache_ops_are_available
-    dynamic_quant_available = backend.native_dynamic_quant_is_available
-    moe_ops_available = backend.native_moe_ops_are_available
-
     impls = [
-        OpImpl(
-            op_name="mla_prefill",
-            impl_id="vendor.thead",
-            kind=BackendImplKind.VENDOR,
-            fn=_bind_is_available(
-                backend.mla_prefill, backend.mla_prefill_is_available
+        _vendor_impl(
+            "mla_prefill",
+            _bind_is_available(backend.mla_prefill, backend.mla_prefill_is_available),
+        ),
+        _vendor_impl(
+            "bf16_indexer_cache_write",
+            _bind_is_available(
+                backend.bf16_indexer_cache_write,
+                backend.native_cache_ops_are_available,
             ),
-            vendor="thead",
-            priority=BackendPriority.VENDOR,
         ),
-        OpImpl(
-            op_name="bf16_indexer_cache_write",
-            impl_id="vendor.thead",
-            kind=BackendImplKind.VENDOR,
-            fn=_bind_is_available(
-                backend.bf16_indexer_cache_write, cache_ops_available
+        _vendor_impl(
+            "dynamic_per_token_quant_int8",
+            _bind_is_available(
+                backend.dynamic_per_token_quant_int8,
+                backend.native_dynamic_quant_is_available,
             ),
-            vendor="thead",
-            priority=BackendPriority.VENDOR,
         ),
-        OpImpl(
-            op_name="dynamic_per_token_quant_int8",
-            impl_id="vendor.thead",
-            kind=BackendImplKind.VENDOR,
-            fn=_bind_is_available(
-                backend.dynamic_per_token_quant_int8, dynamic_quant_available
+        _vendor_impl(
+            "moe_align_block_size",
+            _bind_is_available(
+                backend.moe_align_block_size, backend.native_moe_ops_are_available
             ),
-            vendor="thead",
-            priority=BackendPriority.VENDOR,
         ),
-        OpImpl(
-            op_name="moe_align_block_size",
-            impl_id="vendor.thead",
-            kind=BackendImplKind.VENDOR,
-            fn=_bind_is_available(backend.moe_align_block_size, moe_ops_available),
-            vendor="thead",
-            priority=BackendPriority.VENDOR,
+        _vendor_impl(
+            "moe_sum",
+            _bind_is_available(backend.moe_sum, backend.native_moe_ops_are_available),
         ),
-        OpImpl(
-            op_name="moe_sum",
-            impl_id="vendor.thead",
-            kind=BackendImplKind.VENDOR,
-            fn=_bind_is_available(backend.moe_sum, moe_ops_available),
-            vendor="thead",
-            priority=BackendPriority.VENDOR,
+        _vendor_impl(
+            "topk_softmax",
+            _bind_is_available(
+                backend.topk_softmax, backend.native_moe_ops_are_available
+            ),
         ),
-        OpImpl(
-            op_name="topk_softmax",
-            impl_id="vendor.thead",
-            kind=BackendImplKind.VENDOR,
-            fn=_bind_is_available(backend.topk_softmax, moe_ops_available),
-            vendor="thead",
-            priority=BackendPriority.VENDOR,
+        _vendor_impl(
+            "grouped_topk",
+            _bind_is_available(
+                backend.grouped_topk, backend.native_moe_ops_are_available
+            ),
         ),
-        OpImpl(
-            op_name="grouped_topk",
-            impl_id="vendor.thead",
-            kind=BackendImplKind.VENDOR,
-            fn=_bind_is_available(backend.grouped_topk, moe_ops_available),
-            vendor="thead",
-            priority=BackendPriority.VENDOR,
-        ),
-        OpImpl(
-            op_name="attention_backend",
-            impl_id="vendor.thead",
-            kind=BackendImplKind.VENDOR,
-            fn=_bind_is_available(backend.attention_backend, is_avail),
-            vendor="thead",
-            priority=BackendPriority.VENDOR,
+        _vendor_impl(
+            "attention_backend",
+            _bind_is_available(backend.attention_backend, is_avail),
         ),
     ]
 
+    @lru_cache(None)
+    def resolve_indexer():
+        cls = getattr(
+            import_module(
+                "vllm_fl.dispatch.backends.vendor.thead.impl.sparse_indexer"
+            ),
+            "IndexerOps",
+        )
+        return cls()
+
+    def indexer_fn(name):
+        return _lazy_attr(resolve_indexer, name, is_avail)
+
+    def capabilities():
+        import torch
+
+        return {
+            "cache_dtype": torch.bfloat16,
+            "query_dtype": torch.bfloat16,
+            "compressed_page_size": 32,
+        }
+
+    capabilities._is_available = is_avail
+    impls.append(_vendor_impl("sparse_indexer_capabilities", capabilities))
+    for name in (
+        "validate_environment",
+        "prepare_query",
+        "indexer_k_quant_and_cache",
+    ):
+        impls.append(_vendor_impl("sparse_indexer_" + name, indexer_fn(name)))
     registry.register_many(impls)

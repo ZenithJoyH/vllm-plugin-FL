@@ -53,10 +53,40 @@ def _lazy_fn(module: str, name: str, is_available):
 
 
 def _register_capability_ops(registry, is_available):
-    """Register reusable row-wise top-k capabilities from FlagGems."""
+    """Register optional model capabilities implemented by FlagGems."""
     torch_module = import_module("torch")
     torch_module._dynamo.config.ignore_logger_methods.add(logging.Logger.debug)
     specs = {
+        "mhc_pre_with_norm": (
+            "mhc",
+            "mhc_pre",
+            ("flag_gems.fused.mhc", "mhc_pre"),
+        ),
+        "mhc_post": ("mhc", "mhc_post", ("flag_gems.fused.mhc", "mhc_post")),
+        "mhc_fused_post_pre_with_norm": (
+            "mhc",
+            "mhc_fused_post_pre",
+            ("flag_gems.fused.mhc", "mhc_pre"),
+            ("flag_gems.fused.mhc", "mhc_post"),
+        ),
+        "silu_and_mul_with_clamp": (
+            "activation",
+            "silu_and_mul_with_clamp",
+            (
+                "flag_gems.fused.silu_and_mul_with_clamp",
+                "silu_and_mul_with_clamp_kernel",
+            ),
+        ),
+        "sparse_indexer_rotate_indexer_query": (
+            "sparse_indexer",
+            "rotate_indexer_query",
+            ("flag_gems.ops.hadamard_transform", "hadamard_transform"),
+        ),
+        "sparse_indexer_mqa_logits": (
+            "sparse_indexer",
+            "mqa_logits",
+            ("flag_gems.fused.fp8_fp4_mqa_logits", "fp8_fp4_mqa_logits"),
+        ),
         "top_k_per_row_prefill": (
             "top_k_per_row",
             "top_k_per_row_prefill",
@@ -67,10 +97,87 @@ def _register_capability_ops(registry, is_available):
             "top_k_per_row_decode",
             ("flag_gems.fused.top_k_per_row_decode", "top_k_per_row_decode"),
         ),
+        "sparse_indexer_gather_cache": (
+            "sparse_indexer",
+            "gather_cache",
+            (
+                "flag_gems.fused.cp_gather_indexer_k_bf16_cache",
+                "cp_gather_indexer_k_bf16_cache",
+            ),
+        ),
+        "sparse_indexer_paged_mqa_logits": (
+            "sparse_indexer",
+            "paged_mqa_logits",
+            (
+                "flag_gems.fused.bf16_paged_mqa_logits_graph_safe",
+                "bf16_paged_mqa_logits_graph_safe",
+            ),
+        ),
+        "sparse_indexer_pack_seq": (
+            "flag_gems.fused.pack_seq",
+            "pack_seq_triton",
+        ),
+        "sparse_indexer_unpack_seq": (
+            "flag_gems.fused.unpack_seq",
+            "unpack_seq_triton",
+        ),
+        "sparse_indexer_expand_pools_to_tokens": (
+            "flag_gems.fused.indexer_pool",
+            "expand_pools_to_tokens",
+        ),
+        "sparse_indexer_append_tail_to_topk": (
+            "flag_gems.fused.indexer_pool",
+            "append_tail_to_topk",
+        ),
+        "sparse_indexer_persist_prefill_tail": (
+            "sparse_indexer",
+            "persist_prefill_tail",
+            ("flag_gems.fused.prefill_tail", "persist_prefill_tail"),
+        ),
+        "sparse_indexer_kpool_compress_and_write_cache": (
+            "sparse_indexer",
+            "kpool_compress_and_write_cache",
+            (
+                "flag_gems.fused.kpool_compress",
+                "kpool_compress_and_write_cache",
+            ),
+        ),
+        "sparse_indexer_kpool_decode_update_and_maybe_write_cache_batched": (
+            "sparse_indexer",
+            "kpool_decode_update_and_maybe_write_cache_batched",
+            (
+                "flag_gems.fused.kpool_compress",
+                "kpool_decode_update_and_maybe_write_cache_batched",
+            ),
+        ),
+        "causal_conv1d_update": (
+            "flag_gems.fused.causal_conv1d_update",
+            "causal_conv1d_update",
+        ),
+        "causal_conv1d_fn": (
+            "flag_gems.fused.causal_conv1d_update",
+            "causal_conv1d_fn",
+        ),
+        "fused_recurrent_kda": (
+            "flag_gems.fused.fused_recurrent_kda",
+            "fused_recurrent_kda",
+        ),
+        "chunk_kda_with_safe_gate": (
+            "flag_gems.fused.fused_recurrent_kda",
+            "chunk_kda_with_safe_gate",
+        ),
+        "fused_safe_kda_gate": (
+            "flag_gems.fused.fused_safe_kda_gate",
+            "fused_safe_kda_gate",
+        ),
     }
     impls = []
     for op_name, (module_name, symbol, *dependencies) in specs.items():
-        target_module = f"vllm_fl.dispatch.backends.flaggems.impl.{module_name}"
+        target_module = (
+            module_name
+            if module_name.startswith("flag_gems.")
+            else f"vllm_fl.dispatch.backends.flaggems.impl.{module_name}"
+        )
         required_names = (op_name, symbol, *(name for _, name in dependencies))
         if not all(use_flaggems_op(name) for name in required_names):
             continue
@@ -93,7 +200,11 @@ def _register_capability_ops(registry, is_available):
                 op_name=op_name,
                 impl_id="default.flagos",
                 kind=BackendImplKind.DEFAULT,
-                fn=_lazy_fn(target_module, symbol, available),
+                fn=_lazy_fn(
+                    target_module,
+                    symbol,
+                    available,
+                ),
                 vendor=None,
                 priority=BackendPriority.DEFAULT,
             )
