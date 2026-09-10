@@ -119,6 +119,9 @@ def _select_topk(
     # ahead of ReLU changes the selected tokens when individual heads disagree.
     scores = torch.matmul(keys, q.transpose(0, 1))
     logits = (torch.relu(scores) * weights.to(scores.dtype).unsqueeze(0)).sum(dim=-1)
+    # Preserve the BF16 scoring semantics used by the former direct torch.topk,
+    # then adapt only the completed scores to the shared row-wise FP32 ABI.
+    logits = logits.float()
     row_starts = torch.zeros_like(output[:1])
     row_ends = torch.full_like(output[:1], keys.shape[0])
     # Sparse attention consumes the selected positions as a set, so provider
