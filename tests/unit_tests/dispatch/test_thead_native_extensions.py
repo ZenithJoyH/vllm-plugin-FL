@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-import logging
-
 import pytest
 
 from vllm_fl.dispatch.backends.vendor.thead import bootstrap
@@ -30,21 +28,22 @@ def test_missing_bundle_reports_configured_directory(tmp_path, monkeypatch):
     )
 
 
-def test_missing_bundle_warns_once_and_uses_fallback(tmp_path, monkeypatch, caplog):
+def test_missing_bundle_warns_once_and_uses_fallback(tmp_path, monkeypatch):
     monkeypatch.setenv("PPU_SDK", "/opt/ppu")
     monkeypatch.setenv("VLLM_FL_THEAD_NATIVE_LIB_DIR", str(tmp_path))
     monkeypatch.setattr(bootstrap, "_WARNED_MISSING_BUNDLES", set())
+    messages = []
 
-    with caplog.at_level(logging.WARNING, logger=bootstrap.__name__):
-        assert bootstrap.initialize_native_extensions() is False
-        assert bootstrap.initialize_native_extensions() is False
+    def record_warning(message, *args):
+        messages.append(message % args)
 
-    messages = [
-        record.getMessage()
-        for record in caplog.records
-        if "T-Head native extensions are unavailable" in record.getMessage()
-    ]
+    monkeypatch.setattr(bootstrap.logger, "warning", record_warning)
+
+    assert bootstrap.initialize_native_extensions() is False
+    assert bootstrap.initialize_native_extensions() is False
+
     assert len(messages) == 1
+    assert "T-Head native extensions are unavailable" in messages[0]
     assert str(tmp_path) in messages[0]
 
 
