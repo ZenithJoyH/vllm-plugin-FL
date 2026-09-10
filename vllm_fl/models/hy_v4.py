@@ -17,6 +17,7 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config, PretrainedConfig
 
+import vllm.model_executor.layers.fused_moe as fused_moe
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -29,7 +30,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
@@ -1093,7 +1093,11 @@ class HYV4MoE(nn.Module):
 
         # Keep the shared branch outside FusedMoE so HY4's FP32 routed/shared
         # residual addition is explicit and cannot be rounded early to BF16.
-        self.experts = FusedMoE(
+        # Resolve the factory from its owning module at construction time.
+        # WorkerFL installs the FusedMoEFL factory before model construction;
+        # binding FusedMoE during module import would make that hook dependent
+        # on model-inspection/import order.
+        self.experts = fused_moe.FusedMoE(
             gate=self.gate,
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
