@@ -85,6 +85,9 @@ _indexer_decode = CachedOp("bf16_indexer_decode")
 _top_k_per_row_prefill = CachedOp("top_k_per_row_prefill")
 
 
+_HYV4_PREFILL_INDEXER_BLOCK_ROWS = 128
+
+
 def _paged_sequence(
     kv_cache: torch.Tensor,
     block_table: torch.Tensor,
@@ -134,6 +137,61 @@ def _select_topk(
     )
 
 
+def _select_topk_block(
+    q: torch.Tensor,
+    weights: torch.Tensor,
+    keys: torch.Tensor,
+    row_starts: torch.Tensor,
+    row_ends: torch.Tensor,
+    *,
+    key_start: int,
+    key_end: int,
+    request_start: int,
+    topk: int,
+    output: torch.Tensor,
+) -> None:
+    """Select request-local positions for a block of adjacent query rows.
+
+    Rows are kept within one request by the caller. Batching the QK matmul,
+    weighted reduction and Top-K avoids launching the complete eager operator
+    sequence once per query token while preserving the per-row causal range.
+    """
+    output.fill_(-1)
+    if q.shape[0] == 0 or key_end <= key_start or topk <= 0:
+        return
+
+    block_keys = keys[key_start:key_end]
+    scores = torch.matmul(block_keys.unsqueeze(0), q.transpose(1, 2))
+    logits = (
+        torch.relu(scores) * weights.to(scores.dtype).unsqueeze(1)
+    ).sum(dim=-1).float()
+
+    positions = torch.arange(
+        block_keys.shape[0], device=keys.device, dtype=row_starts.dtype
+    )
+    local_starts = row_starts - key_start
+    local_ends = row_ends - key_start
+    valid_positions = (positions.unsqueeze(0) >= local_starts.unsqueeze(1)) & (
+        positions.unsqueeze(0) < local_ends.unsqueeze(1)
+    )
+    logits.masked_fill_(~valid_positions, float("-inf"))
+
+    count = min(topk, output.shape[1], block_keys.shape[0])
+    if count == 0:
+        return
+    selected = torch.topk(logits, count, dim=-1, sorted=True).indices.to(
+        output.dtype
+    )
+    valid_counts = (row_ends - row_starts).clamp(min=0, max=count)
+    selected_ranks = torch.arange(
+        count, device=output.device, dtype=valid_counts.dtype
+    )
+    valid_selections = selected_ranks.unsqueeze(0) < valid_counts.unsqueeze(1)
+    selected.add_(key_start - request_start)
+    selected.masked_fill_(~valid_selections, -1)
+    output[:, :count].copy_(selected)
+
+
 def _hyv4_bf16_sparse_attn_indexer_impl(
     hidden_states: torch.Tensor,
     k_cache_prefix: LayerNameType,
@@ -178,24 +236,61 @@ def _hyv4_bf16_sparse_attn_indexer_impl(
             keys = torch.cat(gathered, dim=0)
             starts = chunk.cu_seqlen_ks.tolist()
             ends = chunk.cu_seqlen_ke.tolist()
-            sequence_starts = chunk.cu_seq_lens[:-1]
+            sequence_starts = chunk.cu_seq_lens[:-1].tolist()
             sequence_ids = torch.searchsorted(
                 chunk.cu_seq_lens[1:], chunk.cu_seqlen_ks, right=True
             ).tolist()
-            for local_row, (start, end, sequence_id) in enumerate(
-                zip(starts, ends, sequence_ids, strict=True)
-            ):
-                token_row = chunk.token_start + local_row
-                request_start = int(sequence_starts[sequence_id].item())
-                _select_topk(
-                    q[token_row],
-                    weights[token_row],
-                    keys[start:end],
-                    topk_tokens,
-                    topk_indices_buffer[token_row],
-                )
-                valid = topk_indices_buffer[token_row] >= 0
-                topk_indices_buffer[token_row, valid] += start - request_start
+            local_row = 0
+            while local_row < len(starts):
+                sequence_id = sequence_ids[local_row]
+                sequence_end = local_row + 1
+                while (
+                    sequence_end < len(sequence_ids)
+                    and sequence_ids[sequence_end] == sequence_id
+                ):
+                    sequence_end += 1
+                request_start = sequence_starts[sequence_id]
+                for block_start in range(
+                    local_row,
+                    sequence_end,
+                    _HYV4_PREFILL_INDEXER_BLOCK_ROWS,
+                ):
+                    block_end = min(
+                        block_start + _HYV4_PREFILL_INDEXER_BLOCK_ROWS,
+                        sequence_end,
+                    )
+                    token_start = chunk.token_start + block_start
+                    token_end = chunk.token_start + block_end
+                    if block_end - block_start == 1:
+                        start = starts[block_start]
+                        end = ends[block_start]
+                        _select_topk(
+                            q[token_start],
+                            weights[token_start],
+                            keys[start:end],
+                            topk_tokens,
+                            topk_indices_buffer[token_start],
+                        )
+                        valid = topk_indices_buffer[token_start] >= 0
+                        topk_indices_buffer[token_start, valid] += (
+                            start - request_start
+                        )
+                        continue
+                    key_start = min(starts[block_start:block_end])
+                    key_end = max(ends[block_start:block_end])
+                    _select_topk_block(
+                        q[token_start:token_end],
+                        weights[token_start:token_end],
+                        keys,
+                        chunk.cu_seqlen_ks[block_start:block_end],
+                        chunk.cu_seqlen_ke[block_start:block_end],
+                        key_start=key_start,
+                        key_end=key_end,
+                        request_start=request_start,
+                        topk=topk_tokens,
+                        output=topk_indices_buffer[token_start:token_end],
+                    )
+                local_row = sequence_end
 
     if metadata.num_decodes:
         assert metadata.decode is not None
