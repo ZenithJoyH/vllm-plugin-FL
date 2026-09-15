@@ -65,6 +65,7 @@ flagos_blacklist:
   - sum_dim
   - exponential_
   - mm
+  - mm_out
   - resolve_neg
   - resolve_conj
   - eq_scalar
@@ -94,6 +95,7 @@ flagos_blacklist:
   - view
   - tensor
   - topk
+  - index
   - slice
 
 # OOT (Out-of-Tree) operator blacklist

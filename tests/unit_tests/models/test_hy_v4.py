@@ -11,6 +11,40 @@ from torch import nn
 from vllm_fl.models import hy_v4
 
 
+class _CountingHostCopy:
+    def __init__(self, values):
+        self.values = values
+        self.calls = 0
+
+    def tolist(self):
+        self.calls += 1
+        return list(self.values)
+
+
+def test_hy4_prefill_host_metadata_is_copied_once_per_chunk():
+    cu_seq_lens = _CountingHostCopy([0, 4, 9])
+    starts = _CountingHostCopy([0, 1, 4, 7])
+    ends = _CountingHostCopy([1, 4, 7, 9])
+    chunk = SimpleNamespace(
+        cu_seq_lens=cu_seq_lens,
+        cu_seqlen_ks=starts,
+        cu_seqlen_ke=ends,
+    )
+
+    first = hy_v4._get_hyv4_prefill_host_metadata(chunk)
+    second = hy_v4._get_hyv4_prefill_host_metadata(chunk)
+
+    assert first is second
+    assert first == (
+        [0, 4, 9],
+        [0, 1, 4, 7],
+        [1, 4, 7, 9],
+        [0, 4],
+        [0, 0, 1, 1],
+    )
+    assert (cu_seq_lens.calls, starts.calls, ends.calls) == (1, 1, 1)
+
+
 def test_hy4_prefill_topk_uses_shared_capability(monkeypatch):
     captured = {}
 

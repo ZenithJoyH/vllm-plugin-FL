@@ -8,6 +8,7 @@ Kernels and platform choices belong to dispatch backends, not this module.
 from __future__ import annotations
 
 import typing
+from bisect import bisect_right
 from collections.abc import Callable, Iterable
 from itertools import islice
 
@@ -86,6 +87,34 @@ _top_k_per_row_prefill = CachedOp("top_k_per_row_prefill")
 
 
 _HYV4_PREFILL_INDEXER_BLOCK_ROWS = 128
+_HYV4_PREFILL_HOST_METADATA_ATTR = "_hyv4_prefill_host_metadata"
+
+
+def _get_hyv4_prefill_host_metadata(
+    chunk: typing.Any,
+) -> tuple[list[int], list[int], list[int], list[int], list[int]]:
+    """Copy invariant prefill metadata to host once for all Indexer layers.
+
+    vLLM builds a fresh chunk object for each model execution and shares that
+    object across the Indexer layers. Caching on the chunk therefore avoids
+    repeated device-to-host synchronization without leaking values into a
+    later request.
+    """
+    cached = getattr(chunk, _HYV4_PREFILL_HOST_METADATA_ATTR, None)
+    if cached is not None:
+        return cached
+
+    cu_seq_lens = chunk.cu_seq_lens.tolist()
+    starts = chunk.cu_seqlen_ks.tolist()
+    ends = chunk.cu_seqlen_ke.tolist()
+    sequence_starts = cu_seq_lens[:-1]
+    sequence_boundaries = cu_seq_lens[1:]
+    sequence_ids = [
+        bisect_right(sequence_boundaries, start) for start in starts
+    ]
+    cached = (cu_seq_lens, starts, ends, sequence_starts, sequence_ids)
+    setattr(chunk, _HYV4_PREFILL_HOST_METADATA_ATTR, cached)
+    return cached
 
 
 def _paged_sequence(
@@ -224,7 +253,13 @@ def _hyv4_bf16_sparse_attn_indexer_impl(
     if metadata.num_prefills:
         assert metadata.prefill is not None
         for chunk in metadata.prefill.chunks:
-            cu_seq_lens = chunk.cu_seq_lens.tolist()
+            (
+                cu_seq_lens,
+                starts,
+                ends,
+                sequence_starts,
+                sequence_ids,
+            ) = _get_hyv4_prefill_host_metadata(chunk)
             gathered = [
                 _paged_sequence(
                     kv_cache,
@@ -234,12 +269,6 @@ def _hyv4_bf16_sparse_attn_indexer_impl(
                 for request_id in range(chunk.num_reqs)
             ]
             keys = torch.cat(gathered, dim=0)
-            starts = chunk.cu_seqlen_ks.tolist()
-            ends = chunk.cu_seqlen_ke.tolist()
-            sequence_starts = chunk.cu_seq_lens[:-1].tolist()
-            sequence_ids = torch.searchsorted(
-                chunk.cu_seq_lens[1:], chunk.cu_seqlen_ks, right=True
-            ).tolist()
             local_row = 0
             while local_row < len(starts):
                 sequence_id = sequence_ids[local_row]
