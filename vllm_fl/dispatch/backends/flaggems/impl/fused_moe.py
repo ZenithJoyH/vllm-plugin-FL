@@ -4,6 +4,7 @@
 FlagGems fused moe operator implementations.
 """
 
+import os
 from typing import Optional
 
 import torch
@@ -73,6 +74,66 @@ def topk_softmax_flaggems(
     return topk_weights, topk_indices
 
 
+_DEFAULT_LARGE_BF16_MOE_CONFIG = {
+    "BLOCK_SIZE_M": 128,
+    "BLOCK_SIZE_N": 128,
+    "BLOCK_SIZE_K": 64,
+    "GROUP_SIZE_M": 1,
+    "SPLIT_K": 1,
+    "num_warps": 8,
+    "num_stages": 3,
+}
+
+
+def _maybe_tune_large_bf16_moe_stage_config(
+    A,
+    B,
+    C,
+    A_scale,
+    B_scale,
+    top_k,
+    config,
+    use_fp8_w8a8,
+    use_int8_w8a8,
+    use_int8_w8a16,
+    use_int4_w4a16,
+    per_channel_quant,
+    block_shape,
+    B_bias,
+):
+    """Experimental PPU tuning for the trace-proven unquantized shape."""
+    if os.environ.get("VLLM_FL_PPU_MOE_STAGE_CONFIG") != "1":
+        return config
+    if (
+        A.dtype != torch.bfloat16
+        or B.dtype != torch.bfloat16
+        or C.dtype != torch.bfloat16
+        or C.size(0) < 4096
+        or A_scale is not None
+        or B_scale is not None
+        or B_bias is not None
+        or use_fp8_w8a8
+        or use_int8_w8a8
+        or use_int8_w8a16
+        or use_int4_w4a16
+        or per_channel_quant
+        or block_shape is not None
+        or any(
+            config.get(key) != value
+            for key, value in _DEFAULT_LARGE_BF16_MOE_CONFIG.items()
+        )
+    ):
+        return config
+
+    tuned_config = dict(config)
+    if B.size() == (288, 256, 4096) and C.size(-1) == 256 and top_k == 8:
+        tuned_config["BLOCK_SIZE_K"] = 128
+    elif B.size() == (288, 4096, 128) and C.size(-1) == 4096 and top_k == 1:
+        tuned_config["BLOCK_SIZE_N"] = 256
+        tuned_config["GROUP_SIZE_M"] = 16
+    return tuned_config
+
+
 def invoke_fused_moe_triton_kernel_flaggems(
     A,
     B,
@@ -96,6 +157,23 @@ def invoke_fused_moe_triton_kernel_flaggems(
     B_bias=None,
 ):
     from flag_gems import invoke_fused_moe_triton_kernel
+
+    config = _maybe_tune_large_bf16_moe_stage_config(
+        A,
+        B,
+        C,
+        A_scale,
+        B_scale,
+        top_k,
+        config,
+        use_fp8_w8a8,
+        use_int8_w8a8,
+        use_int8_w8a16,
+        use_int4_w4a16,
+        per_channel_quant,
+        block_shape,
+        B_bias,
+    )
 
     invoke_fused_moe_triton_kernel(
         A,

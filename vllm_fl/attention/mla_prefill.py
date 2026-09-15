@@ -19,7 +19,12 @@ _BACKEND_PATH = "vllm_fl.attention.mla_prefill.MLAPrefillBackendFL"
 def configure_mla_prefill(vllm_config):
     """Register the generic backend while preserving explicit selections."""
     model_config = vllm_config.model_config
-    if model_config is None or not model_config.use_mla:
+    if model_config is None:
+        return False
+    # Hybrid GLM contains MLA layers without opting into global MLA caching.
+    text_config = getattr(model_config, "hf_text_config", None)
+    hybrid_mla = getattr(text_config, "model_type", None) == "glm5_next_text"
+    if not (model_config.use_mla or hybrid_mla):
         return False
 
     backend = MLAPrefillBackendEnum.CUSTOM

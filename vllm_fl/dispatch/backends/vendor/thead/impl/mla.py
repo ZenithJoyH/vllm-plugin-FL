@@ -85,6 +85,22 @@ class TheadMLASparseImpl(FlashMLASparseImpl):
     ) -> None:
         if kv_cache.numel() == 0:
             return
+        # The pinned native cache kernel requires a 64-wide RoPE component.
+        # Models with a different layout can still use the native sparse
+        # attention kernel; keep only the cache write on the portable helper.
+        if k_pe.shape[-1] != 64:
+            from flag_gems import concat_and_cache_mla
+
+            slots = slot_mapping.flatten()
+            concat_and_cache_mla(
+                kv_c_normed[: slots.shape[0]],
+                k_pe.squeeze(1)[: slots.shape[0]],
+                kv_cache,
+                slots,
+                kv_cache_dtype=kv_cache_dtype,
+                scale=k_scale,
+            )
+            return
         mla_kv_cache_update(
             kv_c_normed,
             k_pe,
@@ -98,7 +114,12 @@ class TheadMLASparseImpl(FlashMLASparseImpl):
         if isinstance(q, tuple):
             ql_nope, q_pe = q
             q = self.q_concat_buffer[: ql_nope.shape[0]]
-            concat_mla_q(ql_nope, q_pe, q)
+            if q_pe.shape[-1] == 64:
+                concat_mla_q(ql_nope, q_pe, q)
+            else:
+                from flag_gems import cat_out
+
+                cat_out((ql_nope, q_pe), dim=-1, out=q)
         return super().forward_mqa(q, kv_c_and_k_pe_cache, attn_metadata, layer)
 
     def _bf16_flash_mla_kernel(
@@ -113,15 +134,18 @@ class TheadMLASparseImpl(FlashMLASparseImpl):
 
         if q.dtype != torch.bfloat16 or kv_c_and_k_pe_cache.dtype != torch.bfloat16:
             raise TypeError("T-Head sparse MLA requires BF16 query and KV cache.")
-        if q.shape[-1] != 576 or kv_c_and_k_pe_cache.shape[-1] != 576:
-            raise ValueError("T-Head sparse MLA requires head_size=576.")
+        head_size = q.shape[-1]
+        if head_size not in (512, 576) or kv_c_and_k_pe_cache.shape[-1] != head_size:
+            raise ValueError(
+                "T-Head sparse MLA requires matching head_size=512 or 576."
+            )
         if self.sinks is not None and self.sinks.device != q.device:
             raise ValueError("T-Head sparse MLA sinks and query must share a device.")
 
         num_tokens = q.shape[0]
         output, _, _ = flash_mla_sparse_fwd(
             q=q,
-            kv=kv_c_and_k_pe_cache.view(-1, 1, 576),
+            kv=kv_c_and_k_pe_cache.view(-1, 1, head_size),
             indices=topk_indices.view(num_tokens, 1, -1),
             sm_scale=self.softmax_scale,
             d_v=self.kv_lora_rank,
