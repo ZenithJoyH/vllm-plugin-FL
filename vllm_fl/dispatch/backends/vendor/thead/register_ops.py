@@ -120,6 +120,32 @@ def register_builtins(registry) -> None:
     def indexer_fn(name):
         return _lazy_attr(resolve_indexer, name, is_avail)
 
+    @lru_cache(None)
+    def resolve_causal_conv1d():
+        return import_module(
+            "vllm_fl.dispatch.backends.vendor.thead.impl.causal_conv1d"
+        )
+
+    @lru_cache(None)
+    def causal_conv1d_is_available():
+        if not is_avail():
+            return False
+        try:
+            return resolve_causal_conv1d().is_available()
+        except (AttributeError, ImportError, OSError):
+            return False
+
+    impls.append(
+        _vendor_impl(
+            "causal_conv1d_fn",
+            _lazy_attr(
+                resolve_causal_conv1d,
+                "causal_conv1d_fn",
+                causal_conv1d_is_available,
+            ),
+        )
+    )
+
     def capabilities():
         import torch
 
