@@ -39,8 +39,8 @@ op_backends:
   topk_softmax: [flagos, vendor, reference]
   grouped_topk: [flagos, vendor, reference]
   attention_backend:
-    - flagos
     - vendor
+    - flagos
     - reference
   rms_norm:
     - flagos
