@@ -82,6 +82,7 @@ flagos_blacklist:
   - sum_dim
   - exponential_
   - mm
+  - index
   - resolve_neg
   - resolve_conj
   - eq_scalar
