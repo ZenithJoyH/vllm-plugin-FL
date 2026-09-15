@@ -221,6 +221,12 @@ def register_model():
 
     apply_glm5next_patches()
 
+    from vllm_fl.patches.thead_kda_prefill import (
+        apply_thead_kda_prefill_metadata_patch,
+    )
+
+    apply_thead_kda_prefill_metadata_patch()
+
     _register_flagcx_connector()
 
     # Register OOT quant kernels so kernel selection can find them

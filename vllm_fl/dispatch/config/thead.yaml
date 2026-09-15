@@ -61,8 +61,9 @@ op_backends:
   mhc_post: [flagos, reference]
   mhc_fused_post_pre_with_norm: [flagos, reference]
 
-  # This vendor adapter applies its own shape gate and safe fallback path.
+  # These vendor adapters apply their own shape gates and safe fallback paths.
   causal_conv1d_fn: [vendor]
+  chunk_kda_with_safe_gate: [vendor]
 
   # Sequence-model kernels are implemented by FlagGems. Cache/state writers use
   # a single backend so a runtime failure can never replay a partial mutation.

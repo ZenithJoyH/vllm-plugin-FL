@@ -60,6 +60,12 @@ def register_builtins(registry) -> None:
 
     backend = TheadBackend()
     is_avail = backend.is_available
+    if is_avail():
+        from vllm_fl.patches.thead_kda_prefill import (
+            apply_thead_kda_prefill_metadata_patch,
+        )
+
+        apply_thead_kda_prefill_metadata_patch()
     impls = [
         _vendor_impl(
             "mla_prefill",
@@ -142,6 +148,32 @@ def register_builtins(registry) -> None:
                 resolve_causal_conv1d,
                 "causal_conv1d_fn",
                 causal_conv1d_is_available,
+            ),
+        )
+    )
+
+    @lru_cache(None)
+    def resolve_chunk_kda():
+        return import_module(
+            "vllm_fl.dispatch.backends.vendor.thead.impl.chunk_kda"
+        )
+
+    @lru_cache(None)
+    def chunk_kda_is_available():
+        if not is_avail():
+            return False
+        try:
+            return resolve_chunk_kda().is_available()
+        except (AttributeError, ImportError, OSError):
+            return False
+
+    impls.append(
+        _vendor_impl(
+            "chunk_kda_with_safe_gate",
+            _lazy_attr(
+                resolve_chunk_kda,
+                "chunk_kda_with_safe_gate",
+                chunk_kda_is_available,
             ),
         )
     )
