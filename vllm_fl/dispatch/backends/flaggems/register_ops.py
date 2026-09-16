@@ -97,6 +97,33 @@ def register_builtins(registry) -> None:
             vendor=None,
             priority=BackendPriority.DEFAULT,
         ),
+        OpImpl(
+            op_name="apply_rotary_emb",
+            impl_id="default.flagos",
+            kind=BackendImplKind.DEFAULT,
+            fn=_bind_is_available(backend.apply_rotary_emb, is_avail),
+            vendor=None,
+            priority=BackendPriority.DEFAULT,
+        ),
+        OpImpl(
+            op_name="swigluoai_uninterleave",
+            impl_id="default.flagos",
+            kind=BackendImplKind.DEFAULT,
+            fn=_bind_is_available(backend.swigluoai_uninterleave, is_avail),
+            vendor=None,
+            priority=BackendPriority.DEFAULT,
+        ),
+        OpImpl(
+            op_name="fused_minimax_m3_qknorm_rope_kv_insert",
+            impl_id="default.flagos",
+            kind=BackendImplKind.DEFAULT,
+            fn=_bind_is_available(
+                backend.fused_minimax_m3_qknorm_rope_kv_insert,
+                is_avail,
+            ),
+            vendor=None,
+            priority=BackendPriority.DEFAULT,
+        ),
         # Attention Backend
         OpImpl(
             op_name="attention_backend",

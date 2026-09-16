@@ -22,6 +22,7 @@ OOT_OPS = {
     "gelu_and_mul": (GeluAndMulFL, "GeluAndMul"),  # noqa F405
     "rms_norm": (RMSNormFL, "RMSNorm"),  # noqa F405
     "rotary_embedding": (RotaryEmbeddingFL, "RotaryEmbedding"),  # noqa F405
+    "apply_rotary_emb": (ApplyRotaryEmbFL, "ApplyRotaryEmb"),  # noqa F405
     # NOTE: fused_moe is NOT registered via PluggableLayer/CustomOp.register_oot.
     # In vllm >= 0.24.0, FusedMoE is a factory function (not a class), so the
     # PluggableLayer OOT path is incompatible.  Instead, FusedMoEFL is injected

@@ -99,6 +99,34 @@ def test_flaggems_quantization_registers_ordered_fallbacks(monkeypatch):
     ]
 
 
+def test_minimax_missing_ops_register_on_default_flagos_backend(monkeypatch):
+    from vllm_fl.dispatch.backends.flaggems import register_ops
+    from vllm_fl.dispatch.types import BackendImplKind
+
+    expected = {
+        "apply_rotary_emb",
+        "swigluoai_uninterleave",
+        "fused_minimax_m3_qknorm_rope_kv_insert",
+    }
+    registered = []
+
+    class Registry:
+        def register_many(self, impls):
+            registered.extend(impls)
+
+    monkeypatch.setattr(
+        register_ops,
+        "use_flaggems_op",
+        lambda op_name: op_name in expected,
+    )
+
+    register_ops.register_builtins(Registry())
+
+    assert {impl.op_name for impl in registered} == expected
+    assert all(impl.kind == BackendImplKind.DEFAULT for impl in registered)
+    assert all(impl.vendor is None for impl in registered)
+
+
 @pytest.mark.gpu
 @pytest.mark.flaggems
 def test_local_triton_quant_matches_reference_on_cuda(device):
