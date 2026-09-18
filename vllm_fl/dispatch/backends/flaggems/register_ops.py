@@ -85,7 +85,7 @@ def _register_capability_ops(registry, is_available):
         "sparse_indexer_mqa_logits": (
             "sparse_indexer",
             "mqa_logits",
-            ("flag_gems.fused.fp8_fp4_mqa_logits", "fp8_fp4_mqa_logits"),
+            ("flaggems_vllm", "fp8_fp4_mqa_logits"),
         ),
         "top_k_per_row_prefill": (
             "top_k_per_row",
@@ -224,6 +224,18 @@ def register_builtins(registry) -> None:
     backend = FlagGemsBackend()
     is_avail = backend.is_available
 
+    @lru_cache(None)
+    def flaggems_vllm_fused_moe_is_available():
+        if not is_avail():
+            return False
+        try:
+            module = import_module("flaggems_vllm")
+            return callable(
+                getattr(module, "invoke_fused_moe_triton_kernel")
+            )
+        except (AttributeError, ImportError, OSError):
+            return False
+
     impls = [
         OpImpl(
             op_name="mla_prefill",
@@ -349,7 +361,10 @@ def register_builtins(registry) -> None:
             op_name="invoke_fused_moe_triton_kernel",
             impl_id="default.flagos",
             kind=BackendImplKind.DEFAULT,
-            fn=_bind_is_available(backend.invoke_fused_moe_triton_kernel, is_avail),
+            fn=_bind_is_available(
+                backend.invoke_fused_moe_triton_kernel,
+                flaggems_vllm_fused_moe_is_available,
+            ),
             vendor=None,
             priority=BackendPriority.DEFAULT,
         ),

@@ -9,7 +9,7 @@ def rotate_indexer_query(q):
 
 
 def mqa_logits(*args, **kwargs):
-    from flag_gems.fused.fp8_fp4_mqa_logits import fp8_fp4_mqa_logits
+    from flaggems_vllm import fp8_fp4_mqa_logits
 
     return fp8_fp4_mqa_logits(*args, **kwargs)
 

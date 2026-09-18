@@ -272,9 +272,11 @@ class FlagGemsBackend(Backend):
         block_shape=None,
         B_bias=None,
     ):
-        from .impl.fused_moe import invoke_fused_moe_triton_kernel_flaggems
+        from .impl.fused_moe import (
+            invoke_fused_moe_triton_kernel_flaggems_vllm,
+        )
 
-        invoke_fused_moe_triton_kernel_flaggems(
+        invoke_fused_moe_triton_kernel_flaggems_vllm(
             A,
             B,
             C,
