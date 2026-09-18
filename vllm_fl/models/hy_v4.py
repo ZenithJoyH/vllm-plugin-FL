@@ -14,6 +14,8 @@ from itertools import islice
 
 import regex as re
 import torch
+import triton
+import triton.language as tl
 import torch.nn.functional as F
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config, PretrainedConfig
@@ -67,12 +69,16 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
 )
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
+from vllm.v1.attention.backends.mla.indexer import (
+    DeepseekV32IndexerMetadata,
+    DeepseekV32IndexerMetadataBuilder,
+)
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.selector import get_attn_backend
 
 from vllm_fl.configs.hy_v4 import HYV4Config
 from vllm_fl.dispatch import CachedOp
+from vllm_fl.utils import use_flaggems_op
 
 logger = init_logger(__name__)
 
@@ -87,7 +93,180 @@ _top_k_per_row_prefill = CachedOp("top_k_per_row_prefill")
 
 
 _HYV4_PREFILL_INDEXER_BLOCK_ROWS = 128
+_HYV4_PREFILL_INDEXER_RANGE_BLOCK = 256
 _HYV4_PREFILL_HOST_METADATA_ATTR = "_hyv4_prefill_host_metadata"
+_HYV4_SPARSE_INDEX_BLOCK_N = 2048
+_HYV4_ROUTER_HIDDEN_SIZE = 6144
+_HYV4_ROUTER_NUM_EXPERTS = 256
+_HYV4_ROUTER_INPUT_DTYPES = (torch.bfloat16, torch.float32)
+
+
+def _select_hyv4_sparse_index_block_n(
+    token_indices: torch.Tensor,
+    num_topk_tokens: int,
+    block_n: int,
+    has_prefill_workspace: bool,
+    return_valid_counts: bool,
+) -> int:
+    """Use one program per HY4 sparse-index row on T-Head.
+
+    The vLLM default uses 16 programs for a 2048-wide row and therefore 16
+    atomic additions for its valid count.  The PPU handles the full row more
+    efficiently in one program.  Keep every other platform, shape and
+    workspace mode on the upstream default.
+    """
+    if (
+        current_platform.vendor_name == "thead"
+        and token_indices.device.type == "cuda"
+        and token_indices.ndim == 2
+        and token_indices.shape[1] == _HYV4_SPARSE_INDEX_BLOCK_N
+        and num_topk_tokens == _HYV4_SPARSE_INDEX_BLOCK_N
+        and not has_prefill_workspace
+        and return_valid_counts
+    ):
+        return _HYV4_SPARSE_INDEX_BLOCK_N
+    return block_n
+
+
+def _install_hyv4_sparse_index_conversion_shim() -> None:
+    """Tune the FlashMLA sparse index conversion without changing vLLM."""
+    from vllm.v1.attention.backends.mla import flashmla_sparse
+
+    marker = "_hyv4_sparse_index_block_n_shim"
+    current = flashmla_sparse.triton_convert_req_index_to_global_index
+    if getattr(current, marker, False):
+        return
+
+    def convert_with_hyv4_block_n(
+        req_id,
+        block_table,
+        token_indices,
+        BLOCK_SIZE=64,
+        NUM_TOPK_TOKENS=2048,
+        BLOCK_N=128,
+        HAS_PREFILL_WORKSPACE=False,
+        prefill_workspace_request_ids=None,
+        prefill_workspace_starts=None,
+        return_valid_counts=False,
+    ):
+        selected_block_n = _select_hyv4_sparse_index_block_n(
+            token_indices,
+            NUM_TOPK_TOKENS,
+            BLOCK_N,
+            HAS_PREFILL_WORKSPACE,
+            return_valid_counts,
+        )
+        return current(
+            req_id,
+            block_table,
+            token_indices,
+            BLOCK_SIZE=BLOCK_SIZE,
+            NUM_TOPK_TOKENS=NUM_TOPK_TOKENS,
+            BLOCK_N=selected_block_n,
+            HAS_PREFILL_WORKSPACE=HAS_PREFILL_WORKSPACE,
+            prefill_workspace_request_ids=prefill_workspace_request_ids,
+            prefill_workspace_starts=prefill_workspace_starts,
+            return_valid_counts=return_valid_counts,
+        )
+
+    setattr(convert_with_hyv4_block_n, marker, True)
+    convert_with_hyv4_block_n._vllm_fl_original = current
+    flashmla_sparse.triton_convert_req_index_to_global_index = (
+        convert_with_hyv4_block_n
+    )
+
+
+
+def _attach_hyv4_prefill_host_metadata(
+    chunk: typing.Any,
+    common_attn_metadata: typing.Any,
+    compress_ratio: int,
+) -> None:
+    """Derive Indexer row ranges from CPU metadata already owned by vLLM.
+
+    The generic metadata builder has exact CPU sequence lengths for prefill,
+    but exposes only their device-derived row ranges on each chunk. Recreate
+    the same integer formulas while those CPU inputs are available so the
+    first Indexer layer does not synchronize the device for three ``tolist``
+    calls. The private chunk attribute is consumed only by the Hy4 model.
+    """
+    query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+    seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+    if seq_lens_cpu is None:
+        return
+
+    token_start = int(chunk.token_start)
+    token_end = int(chunk.token_end)
+    query_boundaries = query_start_loc_cpu.tolist()
+    start_idx = bisect_right(query_boundaries, token_start) - 1
+    end_idx = start_idx + int(chunk.num_reqs)
+    if start_idx < 0 or end_idx >= len(query_boundaries):
+        return
+
+    request_origin = query_boundaries[start_idx]
+    query_slice_start = token_start - request_origin
+    query_slice_stop = token_end - request_origin
+    compressed_lengths = [
+        int(seq_lens_cpu[index].item()) // compress_ratio
+        for index in range(start_idx, end_idx)
+    ]
+    cu_seq_lens = [0]
+    for length in compressed_lengths:
+        cu_seq_lens.append(cu_seq_lens[-1] + length)
+
+    starts: list[int] = []
+    ends: list[int] = []
+    sequence_ids: list[int] = []
+    for local_request, request_id in enumerate(range(start_idx, end_idx)):
+        query_start = query_boundaries[request_id] - request_origin
+        query_end = query_boundaries[request_id + 1] - request_origin
+        query_len = query_end - query_start
+        sequence_start = cu_seq_lens[local_request]
+        sequence_len = int(seq_lens_cpu[request_id].item())
+        start_pos = sequence_len - query_len
+        clipped_start = max(query_start, query_slice_start)
+        clipped_end = min(query_end, query_slice_stop)
+        for absolute_position in range(clipped_start, clipped_end):
+            offset = absolute_position - query_start
+            starts.append(sequence_start)
+            ends.append(
+                sequence_start + (start_pos + 1 + offset) // compress_ratio
+            )
+            sequence_ids.append(local_request)
+
+    if len(starts) != token_end - token_start:
+        return
+    cached = (
+        cu_seq_lens,
+        starts,
+        ends,
+        cu_seq_lens[:-1],
+        sequence_ids,
+    )
+    setattr(chunk, _HYV4_PREFILL_HOST_METADATA_ATTR, cached)
+
+
+def _install_hyv4_indexer_metadata_builder_shim() -> None:
+    """Attach host metadata at build time without changing vLLM sources."""
+    marker = "_hyv4_prefill_host_metadata_shim"
+    if getattr(DeepseekV32IndexerMetadataBuilder, marker, False):
+        return
+    original_build = DeepseekV32IndexerMetadataBuilder.build
+
+    def build_with_hyv4_host_metadata(self, *args, **kwargs):
+        metadata = original_build(self, *args, **kwargs)
+        common_attn_metadata = kwargs.get("common_attn_metadata")
+        if common_attn_metadata is None and len(args) >= 2:
+            common_attn_metadata = args[1]
+        if metadata.prefill is not None and common_attn_metadata is not None:
+            for chunk in metadata.prefill.chunks:
+                _attach_hyv4_prefill_host_metadata(
+                    chunk, common_attn_metadata, self.compress_ratio
+                )
+        return metadata
+
+    DeepseekV32IndexerMetadataBuilder.build = build_with_hyv4_host_metadata
+    setattr(DeepseekV32IndexerMetadataBuilder, marker, True)
 
 
 def _get_hyv4_prefill_host_metadata(
@@ -115,6 +294,10 @@ def _get_hyv4_prefill_host_metadata(
     cached = (cu_seq_lens, starts, ends, sequence_starts, sequence_ids)
     setattr(chunk, _HYV4_PREFILL_HOST_METADATA_ATTR, cached)
     return cached
+
+
+_install_hyv4_indexer_metadata_builder_shim()
+_install_hyv4_sparse_index_conversion_shim()
 
 
 def _paged_sequence(
@@ -166,6 +349,140 @@ def _select_topk(
     )
 
 
+@triton.jit
+def _fill_hyv4_full_range_indices_kernel(
+    output,
+    row_starts,
+    row_ends,
+    request_start,
+    stride_output,
+    TOPK: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0)
+    block = tl.program_id(1)
+    offsets = block * BLOCK + tl.arange(0, BLOCK)
+    row_start = tl.load(row_starts + row)
+    row_end = tl.load(row_ends + row)
+    valid = offsets < (row_end - row_start)
+    values = row_start - request_start + offsets
+    tl.store(
+        output + row * stride_output + offsets,
+        tl.where(valid, values, -1),
+        mask=offsets < TOPK,
+    )
+
+
+def _fill_hyv4_full_range_indices(
+    row_starts: torch.Tensor,
+    row_ends: torch.Tensor,
+    request_start: int,
+    output: torch.Tensor,
+) -> None:
+    """Emit every valid request-relative position without scoring.
+
+    The caller proves that every row length fits in ``output.shape[1]``.
+    This path is both the exact set result and the stable fallback for small
+    row widths that are not supported by the shared radix Top-K provider.
+    """
+    if output.numel() == 0:
+        return
+    if output.device.type != "cuda":
+        positions = torch.arange(
+            output.shape[1], device=output.device, dtype=row_starts.dtype
+        )
+        values = row_starts.unsqueeze(1) - request_start + positions
+        valid = positions < (row_ends - row_starts).unsqueeze(1)
+        output.copy_(torch.where(valid, values, -1))
+        return
+    _fill_hyv4_full_range_indices_kernel[
+        (
+            output.shape[0],
+            triton.cdiv(
+                output.shape[1], _HYV4_PREFILL_INDEXER_RANGE_BLOCK
+            ),
+        )
+    ](
+        output,
+        row_starts,
+        row_ends,
+        request_start,
+        output.stride(0),
+        TOPK=output.shape[1],
+        BLOCK=_HYV4_PREFILL_INDEXER_RANGE_BLOCK,
+        num_warps=4,
+        num_stages=1,
+    )
+
+
+@triton.jit
+def _hyv4_fused_relu_weight_kernel(
+    scores,
+    weights,
+    products,
+    numel,
+    row_width: tl.constexpr,
+    heads: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    """Fuse ReLU and BF16 weighting while retaining the native sum."""
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    valid = offsets < numel
+    head = offsets % heads
+    row = offsets // row_width
+    score = tl.load(scores + offsets, mask=valid, other=0.0)
+    weight = tl.load(
+        weights + row * heads + head,
+        mask=valid,
+        other=0.0,
+    ).to(tl.bfloat16)
+    product = (tl.maximum(score, 0.0) * weight).to(tl.bfloat16)
+    tl.store(products + offsets, product, mask=valid)
+
+
+def _hyv4_weighted_relu_reduce(
+    scores: torch.Tensor,
+    weights: torch.Tensor,
+) -> torch.Tensor:
+    """Return FP32 Indexer logits with the checkpoint's BF16 semantics."""
+    if (
+        scores.device.type != "cuda"
+        or scores.ndim != 3
+        or weights.ndim != 2
+        or scores.shape[0] != weights.shape[0]
+        or scores.shape[2] != weights.shape[1]
+        or scores.shape[2] != 32
+        or not scores.is_contiguous()
+        or not weights.is_contiguous()
+    ):
+        return (
+            torch.relu(scores)
+            * weights.to(scores.dtype).unsqueeze(1)
+        ).sum(dim=-1).float()
+
+    rows, keys_per_row, heads = scores.shape
+    products = torch.empty_like(scores)
+    numel = scores.numel()
+    block = 256
+    _hyv4_fused_relu_weight_kernel[
+        (triton.cdiv(numel, block),)
+    ](
+        scores,
+        weights,
+        products,
+        numel,
+        keys_per_row * heads,
+        heads,
+        BLOCK=block,
+        num_warps=4,
+        num_stages=1,
+    )
+    # Preserve the existing native BF16 reduction order exactly. A fully
+    # fused Triton reduction is faster but changes threshold-adjacent TopK
+    # selections because its accumulation order differs.
+    return products.sum(dim=-1).float()
+
+
 def _select_topk_block(
     q: torch.Tensor,
     weights: torch.Tensor,
@@ -191,34 +508,42 @@ def _select_topk_block(
 
     block_keys = keys[key_start:key_end]
     scores = torch.matmul(block_keys.unsqueeze(0), q.transpose(1, 2))
-    logits = (
-        torch.relu(scores) * weights.to(scores.dtype).unsqueeze(1)
-    ).sum(dim=-1).float()
+    logits = _hyv4_weighted_relu_reduce(scores, weights)
 
-    positions = torch.arange(
-        block_keys.shape[0], device=keys.device, dtype=row_starts.dtype
-    )
     local_starts = row_starts - key_start
     local_ends = row_ends - key_start
-    valid_positions = (positions.unsqueeze(0) >= local_starts.unsqueeze(1)) & (
-        positions.unsqueeze(0) < local_ends.unsqueeze(1)
-    )
-    logits.masked_fill_(~valid_positions, float("-inf"))
-
     count = min(topk, output.shape[1], block_keys.shape[0])
     if count == 0:
         return
-    selected = torch.topk(logits, count, dim=-1, sorted=True).indices.to(
-        output.dtype
+    selected = output[:, :count]
+    # The shared row-wise provider consumes each row's valid range directly,
+    # avoiding the dense causal mask and the generic torch.topk path. It
+    # returns positions relative to the row start, so translate them to the
+    # request-relative indices consumed by sparse MLA.
+    _top_k_per_row_prefill(
+        logits,
+        local_starts.contiguous(),
+        local_ends.contiguous(),
+        selected,
     )
-    valid_counts = (row_ends - row_starts).clamp(min=0, max=count)
-    selected_ranks = torch.arange(
-        count, device=output.device, dtype=valid_counts.dtype
-    )
-    valid_selections = selected_ranks.unsqueeze(0) < valid_counts.unsqueeze(1)
-    selected.add_(key_start - request_start)
-    selected.masked_fill_(~valid_selections, -1)
-    output[:, :count].copy_(selected)
+    valid = selected >= 0
+    selected.add_((row_starts - request_start).unsqueeze(1))
+    selected.masked_fill_(~valid, -1)
+
+
+def _translate_hyv4_selected_prefix(
+    indices: torch.Tensor,
+    count: int,
+    request_offset: int,
+) -> None:
+    """Translate a fully populated Top-K prefix to request coordinates.
+
+    The single-row scoring path is entered only when the valid key range is
+    larger than ``count``.  Its provider therefore fills every element in
+    ``indices[:count]``; translating that fixed prefix avoids boolean indexing
+    and the implicit ``aten::nonzero`` host synchronization it introduces.
+    """
+    indices[:count].add_(request_offset)
 
 
 def _hyv4_bf16_sparse_attn_indexer_impl(
@@ -260,15 +585,24 @@ def _hyv4_bf16_sparse_attn_indexer_impl(
                 sequence_starts,
                 sequence_ids,
             ) = _get_hyv4_prefill_host_metadata(chunk)
-            gathered = [
-                _paged_sequence(
-                    kv_cache,
-                    chunk.block_table[request_id],
-                    cu_seq_lens[request_id + 1] - cu_seq_lens[request_id],
-                )
-                for request_id in range(chunk.num_reqs)
-            ]
-            keys = torch.cat(gathered, dim=0)
+            selection_limit = min(
+                topk_tokens, topk_indices_buffer.shape[1]
+            )
+            needs_scoring = selection_limit <= 0 or any(
+                end - start > selection_limit
+                for start, end in zip(starts, ends)
+            )
+            keys = None
+            if needs_scoring:
+                gathered = [
+                    _paged_sequence(
+                        kv_cache,
+                        chunk.block_table[request_id],
+                        cu_seq_lens[request_id + 1] - cu_seq_lens[request_id],
+                    )
+                    for request_id in range(chunk.num_reqs)
+                ]
+                keys = torch.cat(gathered, dim=0)
             local_row = 0
             while local_row < len(starts):
                 sequence_id = sequence_ids[local_row]
@@ -290,6 +624,22 @@ def _hyv4_bf16_sparse_attn_indexer_impl(
                     )
                     token_start = chunk.token_start + block_start
                     token_end = chunk.token_start + block_end
+                    block_fits = selection_limit > 0 and all(
+                        ends[row] - starts[row] <= selection_limit
+                        for row in range(block_start, block_end)
+                    )
+                    if block_fits:
+                        _fill_hyv4_full_range_indices(
+                            chunk.cu_seqlen_ks[block_start:block_end],
+                            chunk.cu_seqlen_ke[block_start:block_end],
+                            request_start,
+                            topk_indices_buffer[token_start:token_end],
+                        )
+                        continue
+                    if keys is None:
+                        raise AssertionError(
+                            "HYV4 Indexer scoring keys were not gathered"
+                        )
                     if block_end - block_start == 1:
                         start = starts[block_start]
                         end = ends[block_start]
@@ -300,9 +650,10 @@ def _hyv4_bf16_sparse_attn_indexer_impl(
                             topk_tokens,
                             topk_indices_buffer[token_start],
                         )
-                        valid = topk_indices_buffer[token_start] >= 0
-                        topk_indices_buffer[token_start, valid] += (
-                            start - request_start
+                        _translate_hyv4_selected_prefix(
+                            topk_indices_buffer[token_start],
+                            selection_limit,
+                            start - request_start,
                         )
                         continue
                     key_start = min(starts[block_start:block_end])
@@ -1180,6 +1531,86 @@ class HYV4DenseMLP(nn.Module):
         return hidden_states
 
 
+def _can_use_hyv4_native_router_mm(
+    input_size: int,
+    output_size: int,
+    bias: bool,
+    params_dtype: torch.dtype | None,
+    out_dtype: torch.dtype | None,
+) -> bool:
+    """Return whether HY4 can bypass FlagGems linear for native FP32 MM.
+
+    T-Head's native full-FP32 GEMM is substantially faster for the HY4 router
+    shape.  Requiring ``mm`` in the FlagGems blacklist makes the dispatch
+    contract explicit: ``torch.mm`` must reach the platform implementation
+    instead of being intercepted by FlagGems again.  Reduced-precision matmul
+    modes are excluded because they can change the selected Top-8 expert set.
+    """
+    try:
+        allow_tf32 = bool(torch.backends.cuda.matmul.allow_tf32)
+    except (AttributeError, RuntimeError):
+        return False
+    return (
+        current_platform.vendor_name == "thead"
+        and input_size == _HYV4_ROUTER_HIDDEN_SIZE
+        and output_size == _HYV4_ROUTER_NUM_EXPERTS
+        and not bias
+        and params_dtype == torch.float32
+        and out_dtype == torch.float32
+        and torch.get_float32_matmul_precision() == "highest"
+        and not allow_tf32
+        and not use_flaggems_op("mm")
+    )
+
+
+class HYV4RouterLinear(GateLinear):
+    """HY4 router gate with a T-Head native full-FP32 GEMM fast path."""
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        bias: bool = False,
+        out_dtype: torch.dtype | None = None,
+        params_dtype: torch.dtype | None = None,
+        force_fp32_compute: bool = False,
+        prefix: str = "",
+    ) -> None:
+        super().__init__(
+            input_size=input_size,
+            output_size=output_size,
+            bias=bias,
+            out_dtype=out_dtype,
+            params_dtype=params_dtype,
+            force_fp32_compute=force_fp32_compute,
+            prefix=prefix,
+        )
+        self._use_thead_native_router_mm = _can_use_hyv4_native_router_mm(
+            input_size,
+            output_size,
+            bias,
+            params_dtype,
+            out_dtype,
+        )
+
+    def forward(
+        self, x: torch.Tensor
+    ) -> torch.Tensor | tuple[torch.Tensor, nn.Parameter | None]:
+        if (
+            self._use_thead_native_router_mm
+            and x.ndim == 2
+            and x.shape[-1] == _HYV4_ROUTER_HIDDEN_SIZE
+            and self.weight.shape
+            == (_HYV4_ROUTER_NUM_EXPERTS, _HYV4_ROUTER_HIDDEN_SIZE)
+            and x.dtype in _HYV4_ROUTER_INPUT_DTYPES
+            and self.weight.dtype == torch.float32
+        ):
+            if x.dtype != self.weight.dtype:
+                x = x.to(self.weight.dtype)
+            return torch.mm(x, self.weight.T), None
+        return super().forward(x)
+
+
 class HYV4MoE(nn.Module):
     """HY4 no-aux sigmoid routed experts plus one shared expert."""
 
@@ -1199,7 +1630,7 @@ class HYV4MoE(nn.Module):
         if config.hidden_act != "silu":
             raise ValueError("HY4 currently supports only the silu activation")
 
-        self.gate = GateLinear(
+        self.gate = HYV4RouterLinear(
             config.hidden_size,
             config.n_routed_experts,
             out_dtype=torch.float32,
@@ -1207,8 +1638,9 @@ class HYV4MoE(nn.Module):
             prefix=f"{prefix}.gate",
         )
         # The SM90 DSV3 router kernel selected by vLLM for H=6144/E=256
-        # requires BF16 weights. HY4 stores and evaluates the router in FP32,
-        # so keep this model on GateLinear's FP32 F.linear fallback instead.
+        # requires BF16 weights. HY4 stores and evaluates the router in FP32;
+        # the model-specific gate above uses native full-FP32 MM on T-Head and
+        # otherwise preserves GateLinear's fallback.
         self.gate.allow_dsv3_router_gemm = False
         self.gate.e_score_correction_bias = nn.Parameter(
             torch.empty(config.n_routed_experts, dtype=torch.float32)

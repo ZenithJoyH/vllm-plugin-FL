@@ -97,6 +97,7 @@ flagos_blacklist:
   - topk
   - index
   - slice
+  - index_put_
 
 # OOT (Out-of-Tree) operator blacklist
 # oot_blacklist: []
