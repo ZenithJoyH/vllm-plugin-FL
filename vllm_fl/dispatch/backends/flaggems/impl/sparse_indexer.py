@@ -15,17 +15,13 @@ def mqa_logits(*args, **kwargs):
 
 
 def gather_cache(*args, **kwargs):
-    from flag_gems.fused.cp_gather_indexer_k_bf16_cache import (
-        cp_gather_indexer_k_bf16_cache,
-    )
+    from flaggems_vllm import cp_gather_indexer_k_bf16_cache
 
     return cp_gather_indexer_k_bf16_cache(*args, **kwargs)
 
 
 def paged_mqa_logits(q, *args, **kwargs):
-    from flag_gems.fused.bf16_paged_mqa_logits_graph_safe import (
-        bf16_paged_mqa_logits_graph_safe,
-    )
+    from flaggems_vllm import bf16_paged_mqa_logits_graph_safe
 
     if q[1] is not None:
         raise ValueError("Query scales must already be folded into weights")
@@ -35,21 +31,19 @@ def paged_mqa_logits(q, *args, **kwargs):
 
 
 def persist_prefill_tail(*args, **kwargs):
-    from flag_gems.fused.prefill_tail import persist_prefill_tail as flaggems_impl
+    from flaggems_vllm import persist_prefill_tail as flaggems_impl
 
     return flaggems_impl(*args, **kwargs)
 
 
 def kpool_compress_and_write_cache(*args, **kwargs):
-    from flag_gems.fused.kpool_compress import (
-        kpool_compress_and_write_cache as flaggems_impl,
-    )
+    from flaggems_vllm import kpool_compress_and_write_cache as flaggems_impl
 
     return flaggems_impl(*args, **kwargs)
 
 
 def kpool_decode_update_and_maybe_write_cache_batched(*args, **kwargs):
-    from flag_gems.fused.kpool_compress import (
+    from flaggems_vllm import (
         kpool_decode_update_and_maybe_write_cache_batched as flaggems_impl,
     )
 
