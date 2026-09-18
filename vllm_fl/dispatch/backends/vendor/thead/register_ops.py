@@ -161,16 +161,19 @@ def register_builtins(registry) -> None:
 
     @lru_cache(None)
     def resolve_chunk_kda():
-        return import_module(
-            "vllm_fl.dispatch.backends.vendor.thead.impl.chunk_kda"
-        )
+        return resolve_flaggems_vllm()
 
     @lru_cache(None)
     def chunk_kda_is_available():
         if not is_avail():
             return False
         try:
-            return resolve_chunk_kda().is_available()
+            implementation = import_module(
+                "flaggems_vllm.runtime.backend._thead.ops.chunk_kda"
+            )
+            return callable(
+                getattr(resolve_chunk_kda(), "chunk_kda_with_safe_gate")
+            ) and implementation.is_available()
         except (AttributeError, ImportError, OSError):
             return False
 
