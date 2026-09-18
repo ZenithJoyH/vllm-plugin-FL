@@ -127,17 +127,24 @@ def register_builtins(registry) -> None:
         return _lazy_attr(resolve_indexer, name, is_avail)
 
     @lru_cache(None)
+    def resolve_flaggems_vllm():
+        return import_module("flaggems_vllm")
+
+    @lru_cache(None)
     def resolve_causal_conv1d():
-        return import_module(
-            "vllm_fl.dispatch.backends.vendor.thead.impl.causal_conv1d"
-        )
+        return resolve_flaggems_vllm()
 
     @lru_cache(None)
     def causal_conv1d_is_available():
         if not is_avail():
             return False
         try:
-            return resolve_causal_conv1d().is_available()
+            implementation = import_module(
+                "flaggems_vllm.runtime.backend._thead.ops.causal_conv1d"
+            )
+            return callable(
+                getattr(resolve_causal_conv1d(), "causal_conv1d_fn")
+            ) and implementation.is_available()
         except (AttributeError, ImportError, OSError):
             return False
 
