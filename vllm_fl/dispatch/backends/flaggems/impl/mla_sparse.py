@@ -30,6 +30,23 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _resolve_flash_mla_sparse_fwd():
+    """Prefer FlagGems-vLLM while preserving the existing optional fallback."""
+    try:
+        import flaggems_vllm
+    except ModuleNotFoundError as error:
+        if error.name != "flaggems_vllm":
+            raise
+    else:
+        impl = getattr(flaggems_vllm, "flash_mla_sparse_fwd", None)
+        if impl is not None:
+            return impl
+
+    import flag_gems
+
+    return flag_gems.flash_mla_sparse_fwd
+
+
 class MLASparseFLMetadataBuilder(FlashMLASparseMetadataBuilder):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
@@ -259,8 +276,7 @@ class MLASparseFLImpl(FlashMLASparseImpl):
         topk_indices: torch.Tensor,
         topk_length: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """BF16 prefill/decode kernel using FlagGems flash_mla_sparse_fwd."""
-        import flag_gems
+        """BF16 prefill/decode using the vLLM-specialized sparse MLA op."""
 
         num_tokens = q.shape[0]
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
@@ -272,7 +288,7 @@ class MLASparseFLImpl(FlashMLASparseImpl):
         )
 
         topk_indices = topk_indices.view(num_tokens, 1, -1)
-        output, _, _ = flag_gems.flash_mla_sparse_fwd(
+        output, _, _ = _resolve_flash_mla_sparse_fwd()(
             q=q,
             kv=kv_c_and_k_pe_cache,
             indices=topk_indices,

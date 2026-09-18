@@ -26,11 +26,27 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
 )
 
 
-def _flaggems_fused_experts_impl(**kwargs) -> torch.Tensor:
-    """Resolve FlagGems lazily after the platform runtime is initialized."""
+def _resolve_flaggems_fused_experts_impl():
+    """Prefer the vLLM-specialized operator while preserving old installs."""
+    try:
+        import flaggems_vllm
+    except ModuleNotFoundError as error:
+        if error.name != "flaggems_vllm":
+            raise
+    else:
+        impl = getattr(flaggems_vllm, "fused_experts_impl", None)
+        if impl is not None:
+            return impl
+
     import flag_gems
 
-    return flag_gems.fused_experts_impl(**kwargs)
+    return flag_gems.fused_experts_impl
+
+
+def _flaggems_fused_experts_impl(**kwargs) -> torch.Tensor:
+    """Resolve the preferred W8A8 MoE operator after runtime initialization."""
+
+    return _resolve_flaggems_fused_experts_impl()(**kwargs)
 
 
 def _validate_w8a8_contract(
@@ -177,12 +193,14 @@ class VllmFunctionalW8A8Experts(TritonExperts):
 
 
 class FlagGemsW8A8Experts(TritonExperts):
-    """Keep inputs floating-point and let FlagGems own the full W8A8 pipeline.
+    """Keep inputs floating-point and let FlagGems-vLLM own the W8A8 pipeline.
 
     The checkpoint contract is ``w1=[E,2I,K]``, ``w2=[E,K,I]`` with
-    per-channel scales ``[E,2I,1]`` and ``[E,K,1]``. FlagGems produces the
-    two dynamic activation scales internally as ``[M,1]`` and
-    ``[M*top_k,1]``.
+    per-channel scales ``[E,2I,1]`` and ``[E,K,1]``. FlagGems-vLLM produces
+    the two dynamic activation scales internally as ``[M,1]`` and
+    ``[M*top_k,1]``. Older environments without the specialized package keep
+    the previous FlagGems implementation as an import-time compatibility
+    fallback.
     """
 
     @property

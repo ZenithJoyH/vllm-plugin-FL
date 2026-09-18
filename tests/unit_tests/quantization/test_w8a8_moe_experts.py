@@ -11,7 +11,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
@@ -74,6 +75,46 @@ def test_vllm_functional_experts_changes_the_triton_input_contract():
         moe_experts.VllmFunctionalW8A8Experts.expects_unquantized_inputs.fget(instance)
         is True
     )
+
+
+def test_w8a8_helper_prefers_flaggems_vllm(monkeypatch):
+    calls = []
+    package = ModuleType("flaggems_vllm")
+
+    def fake_fused_experts_impl(**kwargs):
+        calls.append(kwargs)
+        return kwargs["hidden_states"]
+
+    package.fused_experts_impl = fake_fused_experts_impl
+    monkeypatch.setitem(sys.modules, "flaggems_vllm", package)
+    hidden_states = torch.ones((1, 4), dtype=torch.bfloat16)
+
+    result = moe_experts._flaggems_fused_experts_impl(
+        hidden_states=hidden_states
+    )
+
+    assert result is hidden_states
+    assert len(calls) == 1
+    assert calls[0]["hidden_states"] is hidden_states
+
+
+def test_w8a8_helper_falls_back_when_specialized_symbol_is_missing(monkeypatch):
+    specialized_package = ModuleType("flaggems_vllm")
+    generic_package = ModuleType("flag_gems")
+
+    def generic_impl(**kwargs):
+        return kwargs["hidden_states"]
+
+    generic_package.fused_experts_impl = generic_impl
+    monkeypatch.setitem(sys.modules, "flaggems_vllm", specialized_package)
+    monkeypatch.setitem(sys.modules, "flag_gems", generic_package)
+    hidden_states = torch.ones((1, 4), dtype=torch.bfloat16)
+
+    result = moe_experts._flaggems_fused_experts_impl(
+        hidden_states=hidden_states
+    )
+
+    assert result is hidden_states
 
 
 def test_vllm_functional_experts_call_only_native_vllm(monkeypatch):
