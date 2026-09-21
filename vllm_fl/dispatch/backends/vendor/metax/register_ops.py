@@ -64,6 +64,17 @@ def register_builtins(registry) -> None:
             vendor="metax",
             priority=BackendPriority.VENDOR,
         ),
+        OpImpl(
+            op_name="reshape_and_cache_flash",
+            impl_id="vendor.metax",
+            kind=BackendImplKind.VENDOR,
+            fn=_bind_is_available(
+                backend.reshape_and_cache_flash,
+                backend.is_reshape_and_cache_flash_available,
+            ),
+            vendor="metax",
+            priority=BackendPriority.VENDOR,
+        ),
         # Attention Backend
         OpImpl(
             op_name="attention_backend",
@@ -94,3 +105,8 @@ def register_builtins(registry) -> None:
     ]
 
     registry.register_many(impls)
+
+    # M3 numerical fallbacks stay behind the MetaX backend discovery guard.
+    from vllm_fl.ops.minimax_m3.ops import register as register_minimax_m3
+
+    register_minimax_m3(registry)

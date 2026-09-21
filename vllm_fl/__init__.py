@@ -180,15 +180,16 @@ def register_model():
 
     apply_qwen3_5_text_patches()
 
-    # vLLM's platform has been resolved before general plugins are loaded, so
-    # importing FlagOS dispatch here cannot recurse into platform discovery.
-    # Keep a native MiniMax-M3 custom op when present; otherwise patch its
-    # Python wrapper to enter the Plugin dispatcher.
-    from vllm_fl.patches.minimax_m3 import (
-        patch_minimax_m3_fused_preprocess,
-    )
+    from vllm_fl.patches.minimax_m3_metax import register_metax_models
 
-    patch_minimax_m3_fused_preprocess()
+    # MetaX installs its validated BF16 model path lazily. Other vendors keep
+    # the generic missing-op fallback and its native-op availability guard.
+    if not register_metax_models():
+        from vllm_fl.patches.minimax_m3 import (
+            patch_minimax_m3_fused_preprocess,
+        )
+
+        patch_minimax_m3_fused_preprocess()
 
     from vllm.platforms import current_platform
     if current_platform.device_type == "cpu" and _arm_cpu_platform() is not None:

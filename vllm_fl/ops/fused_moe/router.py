@@ -260,6 +260,8 @@ class FusedTopKBiasRouterFL(FusedTopKBiasRouter):
                 routed_scaling_factor=1.0,
                 e_score_correction_bias=correction_bias,
             )
+            if indices_type is not None:
+                topk_ids = topk_ids.to(indices_type)
         else:
             topk_weights, topk_ids = fused_topk_bias(
                 hidden_states=hidden_states,

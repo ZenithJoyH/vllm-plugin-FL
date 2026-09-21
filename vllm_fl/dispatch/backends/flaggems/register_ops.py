@@ -124,6 +124,18 @@ def register_builtins(registry) -> None:
             vendor=None,
             priority=BackendPriority.DEFAULT,
         ),
+        # KV writes have their own dispatch identity even under vendor attention.
+        OpImpl(
+            op_name="reshape_and_cache_flash",
+            impl_id="default.flaggems",
+            kind=BackendImplKind.DEFAULT,
+            fn=_bind_is_available(
+                backend.reshape_and_cache_flash,
+                backend.is_reshape_and_cache_flash_available,
+            ),
+            vendor=None,
+            priority=BackendPriority.DEFAULT,
+        ),
         # Attention Backend
         OpImpl(
             op_name="attention_backend",
