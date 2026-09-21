@@ -21,8 +21,8 @@ if current_platform.is_out_of_tree():
             return None
 
     get_scheduler_metadata = _dummy_ops.get_scheduler_metadata
-    # The vLLM empty wheel has no native cache kernel.
-    from flag_gems import reshape_and_cache_flash  # noqa: F401
+    # Cache writes select and report their implementation separately from FA.
+    from vllm_fl.ops.kv_cache import reshape_and_cache_flash  # noqa: F401
 
 
 def get_flash_attn_version(

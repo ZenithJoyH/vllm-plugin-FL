@@ -12,7 +12,14 @@ TP configurations are not covered by the deployment validation.
   Triton fallback with FP32 accumulation.
 - Biased sigmoid routing uses FlagGems grouped top-k with one group. The
   bias changes selection only; route weights use unbiased sigmoid scores.
-- Packed gate/up SwiGLU-OAI uses the local clamped Triton implementation.
+- MoE packed gate/up SwiGLU-OAI uses the shared
+  `apply_moe_activation` -> `swigluoai_uninterleave` dispatch, including
+  clamp, alpha and beta. The common MoE pipeline has no MetaX activation branch.
+  Dense/shared MLPs retain the model-specific clamped Triton implementation.
+- Dense KV writes use the separate `reshape_and_cache_flash` dispatch even
+  when attention uses the MetaX backend. Its implementations are
+  `default.flaggems` (the FlagGems kernel) and `vendor.metax` (the native
+  cache kernel, available only when a CUDA kernel is registered).
 - Q/K and index Q/K normalization, partial rotary and paged cache insertion
   use the local BF16 fallback. The normalization output is rounded to BF16
   before rotary, as in the validated baseline.
@@ -33,6 +40,15 @@ operators retain FL dispatch and public `torch.ops.vllm_fl` schemas,
 including explicit mutation declarations and fake implementations.
 The integration does not modify files in the installed vLLM package.
 NVIDIA and other vendors retain their existing model registrations.
+
+For operator coverage, record the cache-write implementation separately from
+the `attention_backend` selection. `default.flaggems` explicitly identifies the
+FlagGems cache kernel. The shared `swigluoai_uninterleave` implementation is a
+plugin-owned Triton fallback in the target branch's FlagOS backend; a
+`kind=flagos` record alone does not establish FlagGems-library coverage.
+Backend preference, per-op overrides, strict mode and the FlagGems allow/deny
+lists also apply to cache writes; the native cache implementation never
+calls FlagGems.
 
 ## Environment
 

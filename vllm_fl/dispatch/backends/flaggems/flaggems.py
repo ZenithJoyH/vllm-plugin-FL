@@ -194,6 +194,37 @@ class FlagGemsBackend(Backend):
             **kwargs,
         )
 
+    def is_reshape_and_cache_flash_available(self) -> bool:
+        if not self.is_available():
+            return False
+        import flag_gems
+
+        return callable(getattr(flag_gems, "reshape_and_cache_flash", None))
+
+    def reshape_and_cache_flash(
+        self,
+        key,
+        value,
+        key_cache,
+        value_cache,
+        slot_mapping,
+        kv_cache_dtype,
+        k_scale,
+        v_scale,
+    ):
+        from .impl.kv_cache import reshape_and_cache_flash_flaggems
+
+        return reshape_and_cache_flash_flaggems(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            kv_cache_dtype,
+            k_scale,
+            v_scale,
+        )
+
     def attention_backend(self, use_mla: bool = False, use_sparse: bool = False) -> str:
         """
         Get the attention backend class path for FlagGems.
