@@ -2,6 +2,7 @@
 
 import sys
 from types import ModuleType
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -97,6 +98,123 @@ def test_flaggems_quantization_registers_ordered_fallbacks(monkeypatch):
         BackendPriority.DEFAULT + 10,
         BackendPriority.DEFAULT,
     ]
+
+
+def test_minimax_and_cache_ops_register_on_default_flagos_backend(monkeypatch):
+    from vllm_fl.dispatch.backends.flaggems import register_ops
+    from vllm_fl.dispatch.types import BackendImplKind
+
+    expected = {
+        "apply_rotary_emb",
+        "swigluoai_uninterleave",
+        "fused_minimax_m3_qknorm_rope_kv_insert",
+        "reshape_and_cache_flash",
+    }
+    registered = []
+
+    class Registry:
+        def register_many(self, impls):
+            registered.extend(impls)
+
+    monkeypatch.setattr(
+        register_ops,
+        "use_flaggems_op",
+        lambda op_name: op_name in expected,
+    )
+
+    register_ops.register_builtins(Registry())
+
+    assert {impl.op_name for impl in registered} == expected
+    assert all(impl.kind == BackendImplKind.DEFAULT for impl in registered)
+    assert all(impl.vendor is None for impl in registered)
+    assert all(impl.fn._is_available.__name__ == "is_available" for impl in registered)
+
+
+def test_minimax_backend_forwards_to_library(monkeypatch):
+    from vllm_fl.dispatch.backends.flaggems.flaggems import FlagGemsBackend
+    from vllm_fl.dispatch.backends.flaggems.impl.activation import (
+        swigluoai_uninterleave_flaggems,
+    )
+
+    calls = []
+    package = ModuleType("flaggems_vllm")
+    package.fused_minimax_m3_qknorm_rope_kv_insert = (
+        lambda *a, **kw: calls.append(("preprocess", a, kw))
+    )
+    package.swigluoai_uninterleave = (
+        lambda *a, **kw: calls.append(("activation", a, kw))
+    )
+    package.reshape_and_cache_flash = (
+        lambda *a, **kw: calls.append(("cache", a, kw))
+    )
+    monkeypatch.setitem(sys.modules, "flaggems_vllm", package)
+
+    FlagGemsBackend().fused_minimax_m3_qknorm_rope_kv_insert("qkv", eps=1e-6)
+    FlagGemsBackend().reshape_and_cache_flash("key", "value", layout="flash")
+    swigluoai_uninterleave_flaggems(
+        "output", "input", clamp_limit=7.0, alpha=1.702, beta=1.0
+    )
+    assert calls == [
+        ("preprocess", ("qkv",), {"eps": 1e-6}),
+        ("cache", ("key", "value"), {"layout": "flash"}),
+        (
+            "activation",
+            ("input", 7.0, 1.702, 1.0),
+            {"out": "output"},
+        ),
+    ]
+
+
+def test_cache_write_registered_for_common_and_metax_paths(monkeypatch):
+    from vllm_fl.dispatch.backends.flaggems import register_ops as gems_ops
+    from vllm_fl.dispatch.backends.vendor.metax import register_ops as metax_ops
+    from vllm_fl.dispatch.types import BackendImplKind
+
+    registered = []
+    registry = Mock()
+    registry.register_many.side_effect = registered.extend
+    monkeypatch.setattr(
+        gems_ops, "use_flaggems_op", lambda name: name == "reshape_and_cache_flash"
+    )
+    gems_ops.register_builtins(registry)
+    metax_ops.register_builtins(registry)
+
+    cache_impls = [
+        impl for impl in registered if impl.op_name == "reshape_and_cache_flash"
+    ]
+    assert len(cache_impls) == 2
+    assert {impl.kind for impl in cache_impls} == {
+        BackendImplKind.DEFAULT,
+        BackendImplKind.VENDOR,
+    }
+    assert {impl.vendor for impl in cache_impls} == {None, "metax"}
+
+
+def test_metax_cache_probe_and_forwarding_stay_in_backend(monkeypatch):
+    import vllm
+
+    from vllm_fl.dispatch.backends.vendor.metax.metax import MacaBackend
+
+    calls = []
+    native_ops = ModuleType("vllm._custom_ops")
+    native_ops.reshape_and_cache_flash = lambda *args: calls.append(args)
+    monkeypatch.setattr(vllm, "_custom_ops", native_ops, raising=False)
+    monkeypatch.setitem(sys.modules, "vllm._custom_ops", native_ops)
+    monkeypatch.setattr(MacaBackend, "is_available", lambda self: True)
+
+    probe = Mock(return_value=True)
+    monkeypatch.setattr(torch._C, "_dispatch_has_kernel_for_dispatch_key", probe)
+    backend = MacaBackend()
+    assert backend.is_reshape_and_cache_flash_available()
+    args = tuple(object() for _ in range(8))
+    backend.reshape_and_cache_flash(*args)
+    assert calls == [args]
+    probe.assert_called_once_with("_C_cache_ops::reshape_and_cache_flash", "CUDA")
+
+    probe.return_value = False
+    assert not backend.is_reshape_and_cache_flash_available()
+    probe.side_effect = RuntimeError("kernel not registered")
+    assert not backend.is_reshape_and_cache_flash_available()
 
 
 @pytest.mark.gpu

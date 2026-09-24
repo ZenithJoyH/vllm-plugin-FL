@@ -5,12 +5,17 @@ from vllm_fl.dispatch import CachedOp
 
 _silu_and_mul = CachedOp("silu_and_mul")
 _gelu_and_mul = CachedOp("gelu_and_mul")
+_swigluoai_uninterleave = CachedOp("swigluoai_uninterleave")
 
 
 def apply_moe_activation(
     activation: MoEActivation,
     output: torch.Tensor,
     input: torch.Tensor,
+    *,
+    clamp_limit: float | None = None,
+    alpha: float = 1.0,
+    beta: float = 0.0,
 ) -> torch.Tensor:
     """Apply MoE activation function."""
     assert input.dim() == 2, "Input must be 2D"
@@ -33,6 +38,17 @@ def apply_moe_activation(
         output.copy_(_gelu_and_mul(None, input))
     elif activation == MoEActivation.SWIGLUOAI:
         torch.ops._C.swigluoai_and_mul(output, input)
+    elif activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
+        assert clamp_limit is not None, (
+            "SWIGLUOAI_UNINTERLEAVE requires a clamp limit"
+        )
+        _swigluoai_uninterleave(
+            output,
+            input,
+            clamp_limit,
+            alpha,
+            beta,
+        )
     elif activation == MoEActivation.SWIGLUSTEP:
         from vllm.model_executor.layers.activation import swiglustep_and_mul_triton
 

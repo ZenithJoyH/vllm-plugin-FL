@@ -132,6 +132,23 @@ class MacaBackend(Backend):
             inplace=inplace,
         )
 
+    def is_reshape_and_cache_flash_available(self) -> bool:
+        if not self.is_available():
+            return False
+        from vllm import _custom_ops  # noqa: F401 -- loads native registrations
+
+        try:
+            return torch._C._dispatch_has_kernel_for_dispatch_key(
+                "_C_cache_ops::reshape_and_cache_flash", "CUDA"
+            )
+        except RuntimeError:
+            return False
+
+    def reshape_and_cache_flash(self, *args, **kwargs) -> None:
+        from vllm import _custom_ops
+
+        return _custom_ops.reshape_and_cache_flash(*args, **kwargs)
+
     def attention_backend(self, use_mla: bool = False, use_sparse: bool = False) -> str:
         """
         Get the attention backend class path for CUDA.

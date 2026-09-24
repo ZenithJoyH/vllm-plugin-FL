@@ -3,9 +3,11 @@
 from typing import Optional
 import torch
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm_fl.dispatch import CachedOp
 
 _rotary_embedding = CachedOp("rotary_embedding")
+_apply_rotary_emb = CachedOp("apply_rotary_emb")
 
 
 class RotaryEmbeddingFL(RotaryEmbedding):
@@ -67,4 +69,16 @@ class RotaryEmbeddingFL(RotaryEmbedding):
         return query, key
 
 
-__all__ = ["RotaryEmbeddingFL"]
+class ApplyRotaryEmbFL(ApplyRotaryEmb):
+    """OOT bridge for standalone/partial RoPE through FlagGems dispatch."""
+
+    def forward_oot(
+        self,
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ) -> torch.Tensor:
+        return _apply_rotary_emb(self, x, cos, sin)
+
+
+__all__ = ["ApplyRotaryEmbFL", "RotaryEmbeddingFL"]

@@ -150,6 +150,53 @@ class FlagGemsBackend(Backend):
             inplace=inplace,
         )
 
+    def apply_rotary_emb(
+        self,
+        obj,
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply standalone rotary embedding, including partial RoPE."""
+        from .impl.rotary import apply_rotary_emb_flaggems
+
+        return apply_rotary_emb_flaggems(obj, x, cos, sin)
+
+    def swigluoai_uninterleave(
+        self,
+        output: torch.Tensor,
+        input: torch.Tensor,
+        clamp_limit: float,
+        alpha: float,
+        beta: float,
+    ) -> None:
+        """Apply MiniMax-M3's uninterleaved SwiGLUOAI activation."""
+        from .impl.activation import swigluoai_uninterleave_flaggems
+
+        return swigluoai_uninterleave_flaggems(
+            output,
+            input,
+            clamp_limit=clamp_limit,
+            alpha=alpha,
+            beta=beta,
+        )
+
+    def fused_minimax_m3_qknorm_rope_kv_insert(
+        self, *args, **kwargs
+    ) -> None:
+        """MiniMax-M3 QK norm, partial RoPE, and paged-cache insertion."""
+        from flaggems_vllm import fused_minimax_m3_qknorm_rope_kv_insert
+
+        return fused_minimax_m3_qknorm_rope_kv_insert(
+            *args,
+            **kwargs,
+        )
+
+    def reshape_and_cache_flash(self, *args, **kwargs) -> None:
+        from flaggems_vllm import reshape_and_cache_flash
+
+        return reshape_and_cache_flash(*args, **kwargs)
+
     def attention_backend(self, use_mla: bool = False, use_sparse: bool = False) -> str:
         """
         Get the attention backend class path for FlagGems.

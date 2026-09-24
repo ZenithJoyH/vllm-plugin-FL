@@ -9,6 +9,26 @@ from __future__ import annotations
 import torch
 
 
+def swigluoai_uninterleave_flaggems(
+    output: torch.Tensor,
+    input: torch.Tensor,
+    *,
+    clamp_limit: float,
+    alpha: float,
+    beta: float,
+) -> None:
+    """Bridge the vLLM output-first contract to FlagGems-vllm."""
+    from flaggems_vllm import swigluoai_uninterleave
+
+    swigluoai_uninterleave(
+        input,
+        clamp_limit,
+        alpha,
+        beta,
+        out=output,
+    )
+
+
 def silu_and_mul_flaggems(obj, x: torch.Tensor) -> torch.Tensor:
     """
     SiLU activation followed by element-wise multiplication using FlagGems.
