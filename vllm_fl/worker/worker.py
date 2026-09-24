@@ -501,11 +501,16 @@ class WorkerFL(WorkerBase):
     def load_model(self, *, load_dummy_weights: bool = False) -> None:
         ### TODO(lms): support manages a memory pool for device tensors.
         from vllm_fl.patches.moe_sum import patch_vllm_moe_sum
+        from vllm_fl.patches.minimax_m3 import patch_minimax_m3_fused_preprocess
 
         # Importing vllm._custom_ops can initialize accelerator kernels. Do
         # this only in a worker after init_device has bound its local device
         # and initialized the distributed environment.
         patch_vllm_moe_sum()
+        if patch_minimax_m3_fused_preprocess():
+            logger.info(
+                "Installed MiniMax-M3 preprocessing patch after device initialization"
+            )
         with set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
         if current_platform.device_type == "musa":

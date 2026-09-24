@@ -227,8 +227,45 @@ class GroupedTopKRouterFL(GroupedTopKRouter):
         return topk_weights, topk_ids
 
 
+def _supports_single_group_sigmoid_topk(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    correction_bias: torch.Tensor | None,
+    top_k: int,
+    indices_type: torch.dtype | None,
+) -> bool:
+    """Bound the grouped-topk adapter, not the upstream router's support.
+
+    The current portable grouped kernels return int32 ids, assume contiguous
+    expert columns, and support at most 32 selections. Restrict this adapter
+    to FP32 scores/bias; other numerical contracts stay on the upstream path.
+    A single expert is excluded because grouped selection sums its top two.
+    """
+    if (
+        correction_bias is None
+        or router_logits.ndim != 2
+        or hidden_states.ndim != 2
+        or hidden_states.shape[0] != router_logits.shape[0]
+        or router_logits.dtype != torch.float32
+        or correction_bias.dtype != torch.float32
+        or correction_bias.ndim != 1
+        or not correction_bias.is_contiguous()
+        or router_logits.stride(-1) != 1
+        or correction_bias.device != router_logits.device
+        or hidden_states.device != router_logits.device
+        or indices_type not in (None, torch.int32, torch.int64)
+    ):
+        return False
+    num_experts = router_logits.shape[-1]
+    return (
+        num_experts >= 2
+        and correction_bias.numel() == num_experts
+        and 1 <= top_k <= min(32, num_experts)
+    )
+
+
 class FusedTopKBiasRouterFL(FusedTopKBiasRouter):
-    """FL router that routes topk_softmax (with bias) through call_op."""
+    """Use dispatch for supported biased sigmoid top-k, otherwise vLLM."""
 
     def _compute_routing(
         self,
@@ -238,17 +275,69 @@ class FusedTopKBiasRouterFL(FusedTopKBiasRouter):
         *,
         input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids = fused_topk_bias(
-            hidden_states=hidden_states,
-            gating_output=router_logits,
-            e_score_correction_bias=self.e_score_correction_bias.data
+        correction_bias = (
+            self.e_score_correction_bias.data
             if self.e_score_correction_bias is not None
-            else None,
-            topk=self.top_k,
-            renormalize=self.renormalize,
-            scoring_func=self.scoring_func,
-            indices_type=indices_type,
+            else None
         )
+        hash_indices_table = getattr(self, "_hash_indices_table", None)
+        if (
+            self.scoring_func == "sigmoid"
+            and hash_indices_table is None
+            and not rocm_aiter_ops.is_fused_moe_enabled()
+            and _supports_single_group_sigmoid_topk(
+                hidden_states,
+                router_logits,
+                correction_bias,
+                self.top_k,
+                indices_type,
+            )
+        ):
+            # A single expert group is equivalent to the ordinary biased
+            # sigmoid top-k contract: bias affects selection only, while the
+            # gathered sigmoid scores are normalized into routing weights.
+            # Routing through CachedOp keeps this on the cross-platform
+            # FlagGems grouped_topk implementation (or configured fallback).
+            output_shape = (router_logits.shape[0], self.top_k)
+            output_dtype = torch.int32 if indices_type is None else indices_type
+            if router_logits.shape[0] == 0:
+                # Do not launch a zero-sized Triton grid.
+                topk_weights = router_logits.new_empty(output_shape)
+                topk_ids = router_logits.new_empty(output_shape, dtype=output_dtype)
+            else:
+                topk_weights, topk_ids = _fl_grouped_topk(
+                    hidden_states=hidden_states,
+                    gating_output=router_logits,
+                    topk=self.top_k,
+                    renormalize=self.renormalize,
+                    num_expert_group=1,
+                    topk_group=1,
+                    scoring_func="sigmoid",
+                    routed_scaling_factor=1.0,
+                    e_score_correction_bias=correction_bias,
+                )
+                # Preserve the caller's index contract without penalizing
+                # the normal int32 path with an extra conversion.
+                if topk_ids.dtype != output_dtype:
+                    topk_ids = topk_ids.to(dtype=output_dtype)
+        else:
+            extra_kwargs = {}
+            if hash_indices_table is not None:
+                # Do not reinterpret hash routing as score-based top-k.
+                extra_kwargs.update(
+                    input_tokens=input_ids,
+                    hash_indices_table=hash_indices_table,
+                )
+            topk_weights, topk_ids = fused_topk_bias(
+                hidden_states=hidden_states,
+                gating_output=router_logits,
+                e_score_correction_bias=correction_bias,
+                topk=self.top_k,
+                renormalize=self.renormalize,
+                scoring_func=self.scoring_func,
+                indices_type=indices_type,
+                **extra_kwargs,
+            )
 
         if self.routed_scaling_factor != 1.0:
             topk_weights *= self.routed_scaling_factor
