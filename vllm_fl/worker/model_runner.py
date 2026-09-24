@@ -120,6 +120,13 @@ def _accelerator_synchronize() -> None:
         torch.accelerator.synchronize()
 
 
+def _async_ready_event() -> torch.Event:
+    """Sleep while waiting on T-Head copies, preserving other platforms."""
+    if current_platform.device_name == "thead":
+        return torch.cuda.Event(blocking=True)
+    return torch.Event()
+
+
 def _uses_qwen38_ngram_embedding(hf_text_config: Any) -> bool:
     """Return whether the model opts into the Qwen3.8 runner metadata path."""
     return bool(
@@ -319,7 +326,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._invalid_req_indices = invalid_req_indices
 
         # Event on the copy stream so we can synchronize the non-blocking copy.
-        self.async_copy_ready_event = torch.Event()
+        self.async_copy_ready_event = _async_ready_event()
 
         # Keep a reference to the device tensor to avoid it being
         # deallocated until we finish copying it to the host.
@@ -440,7 +447,7 @@ class AsyncGPUPoolingModelRunnerOutput(AsyncModelRunnerOutput):
         self._model_runner_output = model_runner_output
 
         # Event on the copy stream so we can synchronize the non-blocking copy.
-        self.async_copy_ready_event = torch.Event()
+        self.async_copy_ready_event = _async_ready_event()
 
         # Keep a reference to the device tensors to avoid them being
         # deallocated until we finish copying it to the host.
@@ -783,7 +790,7 @@ class ModelRunnerFL(
         self.prepare_inputs_event: torch.Event | None = None
         if self.use_async_scheduling:
             self.async_output_copy_stream = current_platform.torch_device_fn.Stream()
-            self.prepare_inputs_event = torch.Event()
+            self.prepare_inputs_event = _async_ready_event()
 
         # self.cudagraph_batch_sizes sorts in ascending order.
         if (

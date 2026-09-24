@@ -1,13 +1,18 @@
 # Copyright (c) 2025 BAAI. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from types import SimpleNamespace
+from unittest.mock import Mock
+
 import pytest
 import torch
 
 from vllm.v1.worker.block_table import MultiGroupBlockTable
 
+import vllm_fl.worker.common_slot_mapping as common_slot_mapping_module
 from vllm_fl.worker.common_slot_mapping import (
     CommonSlotMappingGraphRunner,
+    _replay_common_slot_graph,
     compute_common_slot_mapping,
 )
 
@@ -160,3 +165,31 @@ def test_common_slot_mapping_graph_off_runs_eager() -> None:
         rtol=0,
         atol=0,
     )
+
+
+@pytest.mark.parametrize(
+    ("device_name", "expected_syncs"),
+    [("thead", 1), ("cuda", 0)],
+)
+def test_common_slot_graph_replay_sync_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    device_name: str,
+    expected_syncs: int,
+) -> None:
+    graph = Mock()
+    synchronize = Mock()
+    current_stream = Mock(return_value=SimpleNamespace(synchronize=synchronize))
+    monkeypatch.setattr(
+        common_slot_mapping_module,
+        "current_platform",
+        SimpleNamespace(
+            device_name=device_name,
+            torch_device_fn=SimpleNamespace(current_stream=current_stream),
+        ),
+    )
+
+    _replay_common_slot_graph(graph)
+
+    graph.replay.assert_called_once_with()
+    assert current_stream.call_count == expected_syncs
+    assert synchronize.call_count == expected_syncs

@@ -17,6 +17,16 @@ logger = init_logger(__name__)
 compute_common_slot_mapping = resolve_op("compute_common_slot_mapping")
 
 
+def _replay_common_slot_graph(graph: Any) -> None:
+    graph.replay()
+    # T-Head's separate graph replay can return before metadata writes are
+    # visible to the following model graph. Complete this producer graph
+    # before its slot/state metadata is consumed. Other platforms retain
+    # their existing asynchronous replay behavior.
+    if current_platform.device_name == "thead":
+        current_platform.torch_device_fn.current_stream().synchronize()
+
+
 class CommonSlotMappingGraphRunner:
     """Platform graph wrapper for the common paged-KV slot producer."""
 
@@ -101,5 +111,5 @@ class CommonSlotMappingGraphRunner:
             )
             return False
 
-        graph.replay()
+        _replay_common_slot_graph(graph)
         return True
