@@ -209,6 +209,14 @@ def register_model():
 
     apply_qwen3_5_text_patches()
 
+    # Keep a native MiniMax-M3 custom op when present; otherwise patch its
+    # Python wrapper to call FlagGems-vllm directly.
+    from vllm_fl.patches.minimax_m3 import (
+        patch_minimax_m3_fused_preprocess,
+    )
+
+    patch_minimax_m3_fused_preprocess()
+
     from vllm.platforms import current_platform
     if current_platform.device_type == "cpu" and _arm_cpu_platform() is not None:
         from vllm_fl.patches.arm_cpu_gdn import (

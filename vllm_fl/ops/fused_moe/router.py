@@ -238,17 +238,38 @@ class FusedTopKBiasRouterFL(FusedTopKBiasRouter):
         *,
         input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids = fused_topk_bias(
-            hidden_states=hidden_states,
-            gating_output=router_logits,
-            e_score_correction_bias=self.e_score_correction_bias.data
+        correction_bias = (
+            self.e_score_correction_bias.data
             if self.e_score_correction_bias is not None
-            else None,
-            topk=self.top_k,
-            renormalize=self.renormalize,
-            scoring_func=self.scoring_func,
-            indices_type=indices_type,
+            else None
         )
+        if self.scoring_func == "sigmoid" and correction_bias is not None:
+            # A single expert group is equivalent to the ordinary biased
+            # sigmoid top-k contract: bias affects selection only, while the
+            # gathered sigmoid scores are normalized into routing weights.
+            # Routing through CachedOp keeps this on the cross-platform
+            # FlagGems grouped_topk implementation (or configured fallback).
+            topk_weights, topk_ids = _fl_grouped_topk(
+                hidden_states=hidden_states,
+                gating_output=router_logits,
+                topk=self.top_k,
+                renormalize=self.renormalize,
+                num_expert_group=1,
+                topk_group=1,
+                scoring_func="sigmoid",
+                routed_scaling_factor=1.0,
+                e_score_correction_bias=correction_bias,
+            )
+        else:
+            topk_weights, topk_ids = fused_topk_bias(
+                hidden_states=hidden_states,
+                gating_output=router_logits,
+                e_score_correction_bias=correction_bias,
+                topk=self.top_k,
+                renormalize=self.renormalize,
+                scoring_func=self.scoring_func,
+                indices_type=indices_type,
+            )
 
         if self.routed_scaling_factor != 1.0:
             topk_weights *= self.routed_scaling_factor
