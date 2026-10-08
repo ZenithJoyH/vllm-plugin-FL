@@ -12,7 +12,6 @@ from vllm.v1.worker.block_table import MultiGroupBlockTable
 import vllm_fl.worker.common_slot_mapping as common_slot_mapping_module
 from vllm_fl.worker.common_slot_mapping import (
     CommonSlotMappingGraphRunner,
-    _replay_common_slot_graph,
     compute_common_slot_mapping,
 )
 
@@ -188,7 +187,14 @@ def test_common_slot_graph_replay_sync_policy(
         ),
     )
 
-    _replay_common_slot_graph(graph)
+    # Exercise the inherited replay lifecycle with an already-captured graph.
+    table = object()
+    runner = object.__new__(CommonSlotMappingGraphRunner)
+    runner.graphs = {(id(table), 1): graph}
+    runner._graph_capture_supported = True
+    assert runner.run(
+        table, 1, None, None, None, None, use_graph=True, capture=False
+    )
 
     graph.replay.assert_called_once_with()
     assert current_stream.call_count == expected_syncs

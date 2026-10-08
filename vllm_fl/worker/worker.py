@@ -202,6 +202,18 @@ class WorkerFL(WorkerBase):
         is_driver_worker: bool = False,
     ):
 
+        # GCU (Enflame): the torch_gcu Triton build JIT-compiles flag_gems
+        # kernels inside spawned workers; when every rank shares the default
+        # Triton cache directory, concurrent compilation of the same kernel
+        # can deadlock on the cache file locks. Give each rank its own cache
+        # directory unless the operator overrode it.
+        if current_platform.device_type == "gcu" and not os.environ.get(
+            "TRITON_CACHE_DIR"
+        ):
+            os.environ["TRITON_CACHE_DIR"] = (
+                f"/tmp/triton-cache-fl-rank-{rank}"
+            )
+
         if (
             vllm_config.num_speculative_tokens == 1
             and vllm_config.scheduler_config.async_scheduling
@@ -419,6 +431,10 @@ class WorkerFL(WorkerBase):
         )
         self.device = torch.device(f"{current_platform.device_type}:{visible_device_index}")
         current_platform.set_device(self.device)
+        if current_platform.device_type == "musa":
+            # The loader uses DeviceConfig as its allocation context. Keep it
+            # aligned with this worker's rank-local device, not the frontend's.
+            self.device_config.device = self.device
 
         current_platform.check_if_supports_dtype(self.model_config.dtype)
 
@@ -480,8 +496,31 @@ class WorkerFL(WorkerBase):
     # to hijack tensor allocation.
     def load_model(self, *, load_dummy_weights: bool = False) -> None:
         ### TODO(lms): support manages a memory pool for device tensors.
+        from vllm_fl.patches.moe_sum import patch_vllm_moe_sum
+
+        # Importing vllm._custom_ops can initialize accelerator kernels. Do
+        # this only in a worker after init_device has bound its local device
+        # and initialized the distributed environment.
+        patch_vllm_moe_sum()
         with set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+        if current_platform.device_type == "musa":
+            mismatched = [
+                (name, param.device)
+                for name, param in self.model_runner.model.named_parameters()
+                if param.device.type == "musa" and param.device != self.device
+            ]
+            if mismatched:
+                raise RuntimeError(
+                    f"Rank {self.rank} expected model parameters on {self.device}, "
+                    f"got {mismatched[:3]}"
+                )
+            logger.info(
+                "MUSA rank %d: DeviceConfig=%s, model parameters on %s",
+                self.rank,
+                self.device_config.device,
+                self.device,
+            )
         # with self._maybe_get_memory_pool_context(tag="weights"):
         #     self.model_runner.load_model(eep_scale_up=eep_scale_up)
 
@@ -727,8 +766,17 @@ class WorkerFL(WorkerBase):
         ### NOTE(lms): can add gems kernel pretune here
         # Warmup and tune the kernels used during model execution before
         # cuda graph capture.
-        if current_platform.device_type == "txda":
-            logger.warning("Detected txda device, skipping kernel_warmup")
+        if current_platform.device_type == "txda" or getattr(
+            current_platform, "vendor_name", None
+        ) == "kunlunxin":
+            logger.warning(
+                "Detected %s device, skipping generic kernel_warmup",
+                getattr(
+                    current_platform,
+                    "vendor_name",
+                    current_platform.device_type,
+                ),
+            )
         else:
             try:
                 kernel_warmup(self)

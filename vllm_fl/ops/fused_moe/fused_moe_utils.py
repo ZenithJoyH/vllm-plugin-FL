@@ -295,8 +295,55 @@ class TritonExpertsFL(TritonExperts):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
+        # vLLM 0.24 routes unquantized MoE through this modular Experts API.
+        # Reuse the Kunlunxin implementation migrated from the known-good
+        # plugin instead of entering the generic Triton two-GEMM pipeline.
+        if (
+            self._lora_context is None
+            and getattr(current_platform, "vendor_name", None) == "kunlunxin"
+        ):
+            from vllm_fl.dispatch.backends.vendor.kunlunxin.impl.fused_moe.fused_moe import (
+                fused_experts_impl as klx_fused_experts_impl,
+            )
+
+            output.copy_(
+                klx_fused_experts_impl(
+                    hidden_states,
+                    w1,
+                    w2,
+                    topk_weights,
+                    topk_ids,
+                    inplace=False,
+                    activation=activation.value,
+                    apply_router_weight_on_input=apply_router_weight_on_input,
+                    use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
+                    use_int8_w8a8=self.quant_config.use_int8_w8a8,
+                    use_int8_w8a16=self.quant_config.use_int8_w8a16,
+                    use_int4_w4a16=self.quant_config.use_int4_w4a16,
+                    per_channel_quant=self.per_act_token_quant,
+                    global_num_experts=global_num_experts,
+                    expert_map=expert_map,
+                    w1_scale=self.w1_scale,
+                    w2_scale=self.w2_scale,
+                    a1_scale=a1q_scale,
+                    a2_scale=a2_scale,
+                    block_shape=self.block_shape,
+                    w1_bias=self.w1_bias,
+                    w2_bias=self.w2_bias,
+                )
+            )
+            return
+
         # Fast path (no LoRA, NVIDIA only): single fused FlagGems call.
-        if self._lora_context is None and current_platform.is_cuda():
+        # FlagGems currently only supports the standard SiLU gated activation.
+        # Models such as MiniMax-M3 use SWIGLUOAI and must fall back to the
+        # generic Triton pipeline below, whose activation dispatch supports it.
+        if (
+            self._lora_context is None
+            and current_platform.is_cuda()
+            and activation == MoEActivation.SILU
+            and self.gemm1_clamp_limit is None
+        ):
             import flag_gems
 
             output.copy_(flag_gems.fused_experts_impl(
@@ -450,7 +497,12 @@ class TritonExpertsFL(TritonExperts):
             )
 
         apply_moe_activation(
-            activation, intermediate_cache2, intermediate_cache1.view(-1, N)
+            activation,
+            intermediate_cache2,
+            intermediate_cache1.view(-1, N),
+            clamp_limit=self.gemm1_clamp_limit,
+            alpha=self.gemm1_alpha,
+            beta=self.gemm1_beta,
         )
 
         a2q_scale: torch.Tensor | None = None

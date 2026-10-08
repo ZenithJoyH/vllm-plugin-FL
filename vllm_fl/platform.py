@@ -34,6 +34,7 @@ else:
     CacheDType = None
 
 from vllm_fl.utils import (
+    SPLITTING_OPS,
     DeviceInfo,
     get_device_control_env_var,
     get_device_name,
@@ -49,7 +50,45 @@ dist_backend_dict = {
     "npu": "hccl",
     "cuda": "nccl",
     "musa": "mccl",
+    "gcu": "eccl",
 }
+
+
+def _configure_musa_tp_piecewise_graph(
+    compilation_config,
+    *,
+    all2all_backend: str,
+    data_parallel_size: int,
+) -> None:
+    """Keep MUSA TP collectives outside stream-captured graph segments."""
+    # ProcessGroupMCCL's watchdog may call MUSA APIs while another thread is
+    # capturing a graph. Blocking wait avoids creating that watchdog thread.
+    # This must be set before the process group is constructed.
+    os.environ.setdefault("TORCH_MCCL_BLOCKING_WAIT", "1")
+
+    # Do not enable vLLM's global input-copy wrapper here. Full-model inputs
+    # have dynamic shapes and strides, while only the PIECEWISE segments after
+    # eager MCCL collectives need capture-buffer copies. GraphWrapper handles
+    # those segment inputs locally and still honors an explicit global setting.
+
+    # Keep the conservative torch_musa 2.9 platform default for pointwise
+    # autotuning. This is independent of the input-stride fix above; an
+    # explicit user setting still takes precedence.
+    compilation_config.inductor_compile_config.setdefault(
+        "triton.autotune_pointwise", False
+    )
+
+    # This normally runs immediately after Platform.check_and_update_config.
+    # Initialize vLLM's default attention/KV-cache splitting ops first so
+    # adding device-specific ops does not replace those defaults.
+    compilation_config.set_splitting_ops_for_v1(
+        all2all_backend=all2all_backend,
+        data_parallel_size=data_parallel_size,
+    )
+    assert compilation_config.splitting_ops is not None
+    for op in SPLITTING_OPS.get("musa", ()):
+        if op not in compilation_config.splitting_ops:
+            compilation_config.splitting_ops.append(op)
 
 
 class PlatformFL(Platform):
@@ -86,14 +125,31 @@ class PlatformFL(Platform):
             return True
         if self.vendor_name == "hygon":
             return False
+        if self.vendor_name in ("gcu", "enflame"):
+            return True
         return self.device_type == "cuda"
 
     def is_cuda(self) -> bool:
         """Stateless version of [torch.cuda.is_available][]."""
         return self.device_type == "cuda" and self.vendor_name == "nvidia"
 
+    @classmethod
+    def is_arch_support_pdl(cls) -> bool:
+        if cls.vendor_name != "nvidia":
+            return False
+        try:
+            major, _ = cls.torch_device_fn.get_device_capability()
+        except Exception:
+            return False
+        return major >= 9
+
     def is_musa(self) -> bool:
         if hasattr(torch, 'musa') and torch.musa.is_available():
+            return True
+        return False
+
+    def is_gcu(self) -> bool:
+        if hasattr(torch, 'gcu') and torch.gcu.is_available():
             return True
         return False
     @property
@@ -133,7 +189,7 @@ class PlatformFL(Platform):
     ### TODO(lms): change pin_memory depend device
     @classmethod
     def is_pin_memory_available(cls):
-        if cls.device_type in ["cuda", "xpu", "npu", "musa"]:
+        if cls.device_type in ["cuda", "xpu", "npu", "musa", "gcu"]:
             return True
         return False
 
@@ -190,6 +246,9 @@ class PlatformFL(Platform):
             if cls.device_type == "npu":
                 cache_config.block_size = 128
                 logger.info("Setting kv cache block size to 128 for Ascend NPU.")
+            elif cls.vendor_name == "kunlunxin":
+                cache_config.block_size = 128
+                logger.info("Setting kv cache block size to 128 for Kunlunxin.")
             elif cls.device_type == "musa":
                 cache_config.block_size = 64
                 logger.info("Setting kv cache block size to 64 for MUSA.")
@@ -236,6 +295,26 @@ class PlatformFL(Platform):
             compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
         if (
+            cls.device_type == "musa"
+            and parallel_config.tensor_parallel_size > 1
+            and compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
+        ):
+            effective_dp_size = (
+                parallel_config.data_parallel_size
+                if model_config is None or model_config.is_moe
+                else 1
+            )
+            _configure_musa_tp_piecewise_graph(
+                compilation_config,
+                all2all_backend=parallel_config.all2all_backend,
+                data_parallel_size=effective_dp_size,
+            )
+            logger.info(
+                "MUSA: Keeping TP collective ops outside PIECEWISE graph "
+                "capture because MCCL does not support stream capture."
+            )
+
+        if (
             parallel_config.all2all_backend == "deepep_high_throughput"
             and parallel_config.data_parallel_size > 1
             and compilation_config.cudagraph_mode != CUDAGraphMode.NONE
@@ -263,6 +342,11 @@ class PlatformFL(Platform):
                 attention_config.use_trtllm_ragged_deepseek_prefill = False
                 attention_config.use_trtllm_attention = False
                 attention_config.disable_flashinfer_prefill = True
+
+        # GCU relies on ECCL for collectives; custom all-reduce kernels are
+        # not available.
+        if cls.vendor_name in ("gcu", "enflame"):
+            parallel_config.disable_custom_all_reduce = True
 
     @classmethod
     def get_attn_backend_cls(
@@ -358,7 +442,19 @@ class PlatformFL(Platform):
 
     @classmethod
     def support_static_graph_mode(cls) -> bool:
-        if cls.vendor_name in ["nvidia", "ascend", "metax", "hygon", "mthreads", "iluvatar", "thead"]:
+        if cls.vendor_name in [
+            "nvidia",
+            "ascend",
+            "metax",
+            "hygon",
+            "mthreads",
+            "iluvatar",
+            "thead",
+            "gcu",
+            "enflame",
+            "kunlunxin",
+            "biren",
+        ]:
             return True
         return False
 
@@ -472,6 +568,12 @@ class PlatformFL(Platform):
         # Non-CUDA devices (e.g. txda/tsingmicro) have no CUDA-style capability
         if cls.device_type == "txda":
             return None
+        if cls.device_type == "gcu":
+            gcu = getattr(torch, "gcu", None)
+            if gcu is None:
+                return None
+            major, minor = gcu.get_device_capability(device_id)
+            return DeviceCapability(major=major, minor=minor)
         major, minor = torch.cuda.get_device_capability(device_id)
         return DeviceCapability(major=major, minor=minor)
 

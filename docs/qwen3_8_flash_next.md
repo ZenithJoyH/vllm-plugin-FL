@@ -1,8 +1,8 @@
 # Qwen3.8-Flash-Next / Qwen4Exp
 
 This branch adds the plugin-owned model to the **vLLM 0.24.0** integration line
-(`030plugin-for-day0`). It is not a migration of the repository's vLLM 0.20.2
-`main` branch. No upstream vLLM source changes are required.
+and merges the current repository `main` integration. No upstream vLLM source
+changes are required.
 
 ## Architecture boundaries
 
@@ -58,7 +58,12 @@ tensors and scalar layout metadata and do not import vLLM or `vllm_fl`.
   an earlier row. This correctness fix is retained from the August 25 reference,
   while unrelated async/eventfd optimizations are excluded. Computation goes
   through dispatch; graph lifecycle uses the plugin's `Graph` and platform APIs.
-  Runner activation is limited to PLE models, leaving other models' old path intact.
+  Runner activation is limited to PLE models. The dispatch producer reuses the
+  shared `CommonAttentionMetadataGraphRunner` lifecycle, including warmup,
+  first-capture replay, graph-unavailable eager handling and PIECEWISE request
+  extents. T-Head synchronizes the producer stream after replay. Other models
+  retain the upstream metadata enable policy and generic producer. PLE/QSA
+  dummy forwards retain their slot bindings; generic dummy forwards clear them.
 
 ## Supported boundary
 

@@ -94,6 +94,6 @@ def test_ngram_context_chunk_boundary_eos_and_graph_padding(prompt_embeds):
 
 
 def test_non_ple_runner_never_enters_new_metadata_path():
-    runner = SimpleNamespace(common_slot_mapping_graph=None)
+    runner = SimpleNamespace(common_attention_metadata_graph=None)
     # No input batch, device, graph runtime or dispatch is needed by this path.
-    assert _method("_run_common_slot_mapping")(runner, 4, object()) is False
+    assert _method("_run_common_attention_metadata")(runner, 4, object()) is False
