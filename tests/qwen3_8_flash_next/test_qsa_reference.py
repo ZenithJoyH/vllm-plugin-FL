@@ -133,9 +133,7 @@ def _load_qsa_ops():
             qsa_select_paged_tokens=resolve_op("qsa_select_paged_tokens"),
             qsa_sparse_paged_attention=resolve_op("qsa_sparse_paged_attention"),
             qsa_store_cache_rows=resolve_op("qsa_store_cache_rows"),
-            qsa_compress_groups_with_ratio=resolve_op(
-                "qsa_compress_groups_with_ratio"
-            ),
+            qsa_compress_groups_with_ratio=resolve_op("qsa_compress_groups_with_ratio"),
         )
     except Exception as exc:  # target-GPU jobs must not hide import failures
         pytest.fail(f"vLLM QSA plugin import failed: {type(exc).__name__}: {exc}")

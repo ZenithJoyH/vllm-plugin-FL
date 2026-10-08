@@ -192,9 +192,7 @@ def test_common_slot_graph_replay_sync_policy(
     runner = object.__new__(CommonSlotMappingGraphRunner)
     runner.graphs = {(id(table), 1): graph}
     runner._graph_capture_supported = True
-    assert runner.run(
-        table, 1, None, None, None, None, use_graph=True, capture=False
-    )
+    assert runner.run(table, 1, None, None, None, None, use_graph=True, capture=False)
 
     graph.replay.assert_called_once_with()
     assert current_stream.call_count == expected_syncs

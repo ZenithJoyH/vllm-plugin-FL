@@ -16,7 +16,6 @@ from unittest.mock import Mock
 
 import numpy as np
 
-
 ROOT = Path(__file__).parents[3]
 
 
@@ -24,13 +23,28 @@ def _load_definition(path, name, namespace, *, owner=None):
     tree = ast.parse((ROOT / path).read_text())
     nodes = tree.body
     if owner is not None:
-        nodes = next(node for node in nodes if isinstance(node, ast.ClassDef) and node.name == owner).body
-    node = next(node for node in nodes if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name == name)
+        nodes = next(
+            node
+            for node in nodes
+            if isinstance(node, ast.ClassDef) and node.name == owner
+        ).body
+    node = next(
+        node
+        for node in nodes
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name == name
+    )
     module = ast.Module(
-        body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), node],
+        body=[
+            ast.ImportFrom(
+                module="__future__", names=[ast.alias(name="annotations")], level=0
+            ),
+            node,
+        ],
         type_ignores=[],
     )
-    exec(compile(ast.fix_missing_locations(module), str(ROOT / path), "exec"), namespace)
+    exec(
+        compile(ast.fix_missing_locations(module), str(ROOT / path), "exec"), namespace
+    )
     return namespace[name]
 
 
@@ -90,7 +104,9 @@ class MetadataProducerIntegrationTest(TestCase):
             device_type="cuda",
             torch_device_fn=SimpleNamespace(
                 graph=capture,
-                current_stream=lambda: SimpleNamespace(synchronize=lambda: self.events.append("sync")),
+                current_stream=lambda: SimpleNamespace(
+                    synchronize=lambda: self.events.append("sync")
+                ),
             ),
             get_global_graph_pool=lambda: None,
         )
@@ -101,7 +117,11 @@ class MetadataProducerIntegrationTest(TestCase):
             "logger": Mock(),
             "compute_common_attention_metadata": self.generic_compute,
         }
-        base = _load_definition("vllm_fl/worker/common_attention_metadata.py", "CommonAttentionMetadataGraphRunner", namespace)
+        base = _load_definition(
+            "vllm_fl/worker/common_attention_metadata.py",
+            "CommonAttentionMetadataGraphRunner",
+            namespace,
+        )
         self.slot_class = _load_definition(
             "vllm_fl/worker/common_slot_mapping.py",
             "CommonSlotMappingGraphRunner",
@@ -138,7 +158,9 @@ class MetadataProducerIntegrationTest(TestCase):
             with self.subTest(graph_available=graph_available, use_graph=use_graph):
                 runner = self.slot_class()
                 runner._graph_capture_supported = graph_available
-                self.assertFalse(runner.run(*self.args, use_graph=use_graph, capture=True))
+                self.assertFalse(
+                    runner.run(*self.args, use_graph=use_graph, capture=True)
+                )
                 self.assertEqual(self.output, self.input)
                 self.assertFalse(runner.graphs)
         self.assertEqual(self.events, [])
@@ -161,13 +183,18 @@ class MetadataProducerIntegrationTest(TestCase):
         run = _load_definition(
             "vllm_fl/worker/model_runner.py",
             "_run_common_attention_metadata",
-            {"CUDAGraphMode": Mode, "compute_common_attention_metadata": self.generic_compute},
+            {
+                "CUDAGraphMode": Mode,
+                "compute_common_attention_metadata": self.generic_compute,
+            },
             owner="ModelRunnerFL",
         )
         for graph_class in (self.slot_class, self.base_class):
             for mode in Mode:
                 for ubatching in (False, True):
-                    with self.subTest(graph_class=graph_class.__name__, mode=mode, ubatching=ubatching):
+                    with self.subTest(
+                        graph_class=graph_class.__name__, mode=mode, ubatching=ubatching
+                    ):
                         graph = graph_class()
                         runner = SimpleNamespace(
                             common_attention_metadata_graph=graph,
@@ -195,10 +222,11 @@ class MetadataProducerIntegrationTest(TestCase):
                             self.generic_compute.assert_called_once()
                             self.assertEqual(self.dispatch_calls, dispatch_before)
                         self.assertEqual(args[1], 4 if mode == Mode.PIECEWISE else 1)
-                        self.assertEqual(kwargs["use_graph"], mode != Mode.NONE and not ubatching)
+                        self.assertEqual(
+                            kwargs["use_graph"], mode != Mode.NONE and not ubatching
+                        )
         inactive = SimpleNamespace(common_attention_metadata_graph=None)
         self.assertFalse(run(inactive, 1, Mode.FULL))
-
 
     def test_dummy_capture_preserves_qwen_slots_and_clears_generic_slots(self):
         class HostTensor(np.ndarray):
@@ -244,25 +272,48 @@ class MetadataProducerIntegrationTest(TestCase):
                         speculative_config=None,
                         uses_ngram_embedding=ngram,
                         common_attention_metadata_graph=graph,
-                        _determine_batch_execution_and_padding=Mock(return_value=(
-                            mode, SimpleNamespace(num_tokens=2, num_reqs=2), False, None, None,
-                        )),
+                        _determine_batch_execution_and_padding=Mock(
+                            return_value=(
+                                mode,
+                                SimpleNamespace(num_tokens=2, num_reqs=2),
+                                False,
+                                None,
+                                None,
+                            )
+                        ),
                         _get_slot_mappings=Mock(return_value=({0: slots}, None)),
                         synchronize_input_prep=nullcontext,
                         optimistic_seq_lens_cpu=seq_lens.copy(),
                         seq_lens=seq_lens,
                         query_pos=SimpleNamespace(np=np.zeros(16, dtype=np.int64)),
                         _get_cumsum_and_arange=lambda tokens, out: np.cumsum(tokens),
-                        query_start_loc=SimpleNamespace(np=query_start, copy_to_gpu=Mock()),
+                        query_start_loc=SimpleNamespace(
+                            np=query_start, copy_to_gpu=Mock()
+                        ),
                         input_batch=SimpleNamespace(block_table=Mock()),
-                        _run_common_attention_metadata=Mock(side_effect=lambda *args, **kwargs: slots.fill(42)),
+                        _run_common_attention_metadata=Mock(
+                            side_effect=lambda *args, _slots=slots, **kwargs: (
+                                _slots.fill(42)
+                            )
+                        ),
                         _build_attention_metadata=Mock(return_value=({}, None)),
                         maybe_dummy_run_with_lora=Mock(side_effect=ModelBoundary),
                     )
                     with self.assertRaises(ModelBoundary):
-                        dummy(runner, 2, cudagraph_runtime_mode=mode, is_graph_capturing=True)
+                        dummy(
+                            runner,
+                            2,
+                            cudagraph_runtime_mode=mode,
+                            is_graph_capturing=True,
+                        )
                     np.testing.assert_array_equal(query_start, [0, 1, 2, 2, 2])
                     np.testing.assert_array_equal(seq_lens, [2, 2, 0, 0])
-                    np.testing.assert_array_equal(slots, [42, 42] if ngram else [-1, -1])
-                    runner._run_common_attention_metadata.assert_called_once_with(2, mode, capture=True)
-                    self.assertEqual(runner._build_attention_metadata.call_count, mode == Mode.FULL)
+                    np.testing.assert_array_equal(
+                        slots, [42, 42] if ngram else [-1, -1]
+                    )
+                    runner._run_common_attention_metadata.assert_called_once_with(
+                        2, mode, capture=True
+                    )
+                    self.assertEqual(
+                        runner._build_attention_metadata.call_count, mode == Mode.FULL
+                    )

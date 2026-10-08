@@ -9,7 +9,6 @@ from vllm_fl.dispatch.backends.flaggems.register_ops import register_builtins
 from vllm_fl.dispatch.manager import OpManager
 from vllm_fl.dispatch.policy import SelectionPolicy, policy_context
 
-
 FUSED_OP_NAMES = {
     "qsa_mqa_paged",
     "expand_qsa_block_indices",

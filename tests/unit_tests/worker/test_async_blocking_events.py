@@ -8,7 +8,6 @@ from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import Mock
 
-
 MODEL_RUNNER = Path(__file__).parents[3] / "vllm_fl" / "worker" / "model_runner.py"
 
 
@@ -66,8 +65,7 @@ class AsyncReadyEventTest(TestCase):
                 for node in ast.walk(cls)
                 if isinstance(node, ast.Assign)
                 and any(
-                    isinstance(target, ast.Attribute)
-                    and target.attr == target_name
+                    isinstance(target, ast.Attribute) and target.attr == target_name
                     for target in node.targets
                 )
             ]
