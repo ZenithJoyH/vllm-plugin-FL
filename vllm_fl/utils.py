@@ -51,12 +51,40 @@ VENDOR_DEVICE_MAP: dict[str, dict[str, str]] = {
     "thead": {"device_type": "cuda", "device_name": "thead"},
     # Registered backend: vendor/thead (tsingmicro)
     "tsingmicro": {"device_type": "tsingmicro", "device_name": "txda"},
+    # Registered backend: vendor/gcu (Enflame GCU / torch_gcu).
+    # FlagGems >= 5.4 reports vendor_name "enflame"; older images report
+    # "gcu" — keep both aliases.
+    "gcu": {"device_type": "gcu", "device_name": "gcu"},
+    "enflame": {"device_type": "gcu", "device_name": "gcu"},
+    # Registered backend: vendor/kunlunxin
+    "kunlunxin": {"device_type": "cuda", "device_name": "kunlunxin"},
+    # Registered backend: vendor/supa
+    "biren": {"device_type": "cuda", "device_name": "supa"},
+}
+
+# Extra graph-partition boundaries required by a device runtime. vLLM's
+# default attention/KV-cache splitting ops are still installed first.
+SPLITTING_OPS: dict[str, tuple[str, ...]] = {
+    # MCCL collectives cannot run while a MUSA stream is being captured.
+    "musa": (
+        "vllm::all_reduce",
+        "vllm::all_gather",
+        "vllm::reduce_scatter",
+        "vllm::patched_fused_scaled_matmul_reduce_scatter",
+        "_c10d_functional::all_reduce",
+        "_c10d_functional::all_gather_into_tensor",
+        "_c10d_functional::reduce_scatter_tensor",
+        "_c10d_functional::wait_tensor",
+    ),
 }
 
 # Keep the vLLM base-class no-op for platforms not validated by this change.
 # Operators can opt a platform in without a code change via the override below.
 _DEVICE_CONTROL_ENV_VAR_PLACEHOLDER = "VLLM_DEVICE_CONTROL_ENV_VAR_PLACEHOLDER"
-_VALIDATED_DEVICE_CONTROL_ENV_VARS = {"nvidia": "CUDA_VISIBLE_DEVICES"}
+_VALIDATED_DEVICE_CONTROL_ENV_VARS = {
+    "nvidia": "CUDA_VISIBLE_DEVICES",
+    "kunlunxin": "CUDA_VISIBLE_DEVICES",
+}
 
 
 def _get_vendor_device_field(vendor_name: str, field: str) -> str:
@@ -253,7 +281,18 @@ _load_op_config_from_env()
 class DeviceInfo:
     def __init__(self):
         self.device = DeviceDetector()
-        self.supported_device = ["nvidia", "ascend", "metax", "mthreads", "sunrise", "thead"]
+        self.supported_device = [
+            "nvidia",
+            "ascend",
+            "metax",
+            "mthreads",
+            "sunrise",
+            "thead",
+            "gcu",
+            "enflame",
+            "kunlunxin",
+            "biren",
+        ]
         backend.set_torch_backend_device_fn(self.device.vendor_name)
 
     @property

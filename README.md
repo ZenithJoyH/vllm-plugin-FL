@@ -2,6 +2,13 @@
 
 vllm-plugin-FL is a plugin for the [vLLM](https://github.com/vllm-project/vllm) inference/serving framework, built on FlagOS's unified multi-chip backend — including the unified operator library [FlagGems](https://github.com/flagos-ai/FlagGems) and the unified communication library [FlagCX](https://github.com/flagos-ai/FlagCX). It extends vLLM's capabilities and performance across diverse hardware environments. Without changing vLLM's original interfaces or usage patterns, the same command can run model inference/serving on different chips.
 
+## Adaptation Gate
+
+The adaptation gate validates text, image, and mixed text-image requests across
+the required models in both eager and graph modes. See the
+[adaptation gate cases](./tools/adaptation-gate-cases/README.md) for the test
+matrix, scenarios, and usage.
+
 ## Version Compatibility
 
 | vllm-plugin-FL Branch | Community vLLM Version |
@@ -138,6 +145,12 @@ Library load failures caused by an incompatible ABI or a missing transitive
 dependency are not suppressed. See
 [`PROVENANCE.md`](./vllm_fl/dispatch/backends/vendor/thead/lib/PROVENANCE.md)
 for the exact bundle that has been validated.
+
+
+### Operator profiling
+
+See the [operator profiling tools](./tools/operator_profile/README.md) for a
+reproducible native-vLLM and plugin comparison workflow.
 
 4. (Optional) Install [FlagCX](https://github.com/flagos-ai/FlagCX/blob/main/docs/getting_started.md#build-and-installation)
 
