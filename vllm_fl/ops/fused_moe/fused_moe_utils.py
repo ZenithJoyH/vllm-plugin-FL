@@ -360,12 +360,11 @@ class TritonExpertsFL(TritonExperts):
                 )
                 return
 
-            elif current_platform.device_name == "nvidia":
-                # NVIDIA: let FlagGems own both expert GEMMs for unquantized and W8A16 inputs
-                import flag_gems
+            elif current_platform.device_name in ("nvidia", "metax"):
+                from flaggems_vllm import fused_experts_impl
 
                 output.copy_(
-                    flag_gems.fused_experts_impl(
+                    fused_experts_impl(
                         hidden_states,
                         w1,
                         w2,

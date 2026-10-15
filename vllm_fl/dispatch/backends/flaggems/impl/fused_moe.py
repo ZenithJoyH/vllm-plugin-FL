@@ -19,7 +19,7 @@ def moe_align_block_size_flaggems(
     pad_sorted_ids: bool = False,
     ignore_invalid_experts: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    from flag_gems import moe_align_block_size_triton
+    from flaggems_vllm import moe_align_block_size_triton
 
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
     if pad_sorted_ids:
@@ -56,7 +56,7 @@ def moe_align_block_size_flaggems(
 def topk_softmax_flaggems(
     topk_weights, topk_indices, token_expert_indices, gating_output, renormalize=False
 ):
-    from flag_gems import topk_softmax
+    from flaggems_vllm import topk_softmax
 
     try:
         topk_softmax(
@@ -75,7 +75,7 @@ def topk_softmax_flaggems(
 def topk_softmax_flaggems(
     topk_weights, topk_indices, token_expert_indices, gating_output, renormalize=False
 ):
-    from flag_gems import topk_softmax
+    from flaggems_vllm import topk_softmax
 
     try:
         topk_softmax(
@@ -146,7 +146,7 @@ def fused_topk_bias_flaggems(
         return topk_weights, topk_ids
 
     elif scoring_func == "sqrtsoftplus":
-        from flag_gems import topk_softplus_sqrt
+        from flaggems_vllm import topk_softplus_sqrt
 
         topk_weights, topk_ids, token_expert_indices = _alloc_topk_buffers()
 
@@ -207,7 +207,7 @@ def invoke_fused_moe_triton_kernel_flaggems(
     block_shape=None,
     B_bias=None,
 ):
-    from flag_gems import invoke_fused_moe_triton_kernel
+    from flaggems_vllm import invoke_fused_moe_triton_kernel
 
     invoke_fused_moe_triton_kernel(
         A,
@@ -243,7 +243,7 @@ def grouped_topk_flaggems(
     bias,
     scoring_func=0,
 ):
-    from flag_gems import grouped_topk
+    from flaggems_vllm import grouped_topk
 
     return grouped_topk(
         scores,
@@ -258,6 +258,6 @@ def grouped_topk_flaggems(
 
 
 def moe_sum_flaggems(inp, out):
-    from flag_gems import moe_sum
+    from flaggems_vllm import moe_sum
 
     moe_sum(inp, out)
