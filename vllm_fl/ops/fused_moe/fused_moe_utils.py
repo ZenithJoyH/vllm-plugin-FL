@@ -340,13 +340,15 @@ class TritonExpertsFL(TritonExperts):
             )
             return
 
-        # Fast path (no LoRA, NVIDIA only): single fused FlagGems call.
-        # FlagGems currently only supports the standard SiLU gated activation.
+        # Fast path (no LoRA): NVIDIA and MetaX share the fused-experts path.
+        # The fused implementation supports the standard SiLU gated activation.
         # Models such as MiniMax-M3 use SWIGLUOAI and must fall back to the
         # generic Triton pipeline below, whose activation dispatch supports it.
         if (
             self._lora_context is None
-            and current_platform.is_cuda()
+            and (
+                current_platform.is_cuda() or current_platform.vendor_name == "metax"
+            )
             and activation == MoEActivation.SILU
             and self.gemm1_clamp_limit is None
         ):
