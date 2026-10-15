@@ -40,9 +40,21 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.platforms.interface import DeviceCapability
-from flag_gems import flash_attn_varlen_func, reshape_and_cache_flash
-# from vllm.attention.utils.fa_utils import flash_attn_varlen_func #reshape_and_cache_flash,
-# from flag_gems import reshape_and_cache_flash
+from flag_gems import reshape_and_cache_flash
+
+
+def flash_attn_varlen_func(*args, **kwargs):
+    """Run FlagGems-vLLM inside the already-selected FlagOS attention backend."""
+    from flaggems_vllm import flash_attn_varlen_func as flaggems_flash_attn
+
+    # FP8 scale tensors are not part of the supported FP16/BF16 KV contract.
+    # vLLM passes them even for BF16; MetaX FA2 rejects those optional inputs.
+    if all(kwargs[name].dtype in (torch.float16, torch.bfloat16)
+           for name in ("q", "k", "v")):
+        kwargs = dict(kwargs)
+        for name in ("q_descale", "k_descale", "v_descale"):
+            kwargs.pop(name, None)
+    return flaggems_flash_attn(*args, **kwargs)
 
 logger = init_logger(__name__)
 

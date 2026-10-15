@@ -439,6 +439,11 @@ class WorkerFL(WorkerBase):
     def load_model(self, *, load_dummy_weights: bool = False) -> None:
         ### TODO(lms): support manages a memory pool for device tensors.
         with set_current_vllm_config(self.vllm_config):
+            # Install the shared GDN call-site patch before constructing the
+            # model. Operator registration remains independent of this hook.
+            from vllm_fl.patches.gdn_linear_attn import install_gdn_dispatch
+
+            install_gdn_dispatch()
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
         # with self._maybe_get_memory_pool_context(tag="weights"):
         #     self.model_runner.load_model(eep_scale_up=eep_scale_up)
@@ -608,22 +613,32 @@ class WorkerFL(WorkerBase):
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
+        # vllm 0.20 passes a per-rank kv_cache_config list from the executor;
+        # stock worker_base unwraps it before dispatch, and this override must
+        # too. Each multi-engine core gets its own single-item list (TP=1), so
+        # unwrap by engine-local index rather than global rank.
+        if isinstance(kv_cache_config, list):
+            kv_cache_config = kv_cache_config[0] if len(kv_cache_config) == 1 \
+                else kv_cache_config[self.rank]
         # Init kv cache connector here, because it requires
         # `kv_cache_config`.
         # NOTE(Kuntai): This need to be done before `initialize_kv_cache`,
         # because `initialize_kv_cache` will inject kv cache groups not
         # related to kv cache connector (e.g. kv cache sharing layers).
-        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
+        # The stock worker_base dispatch also runs under this context; some
+        # downstream calls (e.g. kv cache reshape) read the current config.
+        with set_current_vllm_config(self.vllm_config):
+            ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
 
-        ### TODO(lms):
-        # if self.vllm_config.model_config.enable_sleep_mode:
-        #     from vllm.device_allocator.cumem import CuMemAllocator
+            ### TODO(lms):
+            # if self.vllm_config.model_config.enable_sleep_mode:
+            #     from vllm.device_allocator.cumem import CuMemAllocator
 
-        #     allocator = CuMemAllocator.get_instance()
-        #     context = allocator.use_memory_pool(tag="kv_cache")
-        # else:
-        #     context = nullcontext()
-        self.model_runner.initialize_kv_cache(kv_cache_config)
+            #     allocator = CuMemAllocator.get_instance()
+            #     context = allocator.use_memory_pool(tag="kv_cache")
+            # else:
+            #     context = nullcontext()
+            self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
         warmup_sizes = []

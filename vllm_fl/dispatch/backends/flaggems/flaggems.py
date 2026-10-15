@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Optional, Union
 
 import torch
+import torch.nn.functional as F
 import os
 
 from vllm_fl.dispatch.backends.base import Backend
@@ -142,6 +143,121 @@ class FlagGemsBackend(Backend):
         from .impl.activation import silu_and_mul_with_clamp_flaggems
 
         return silu_and_mul_with_clamp_flaggems(x, swiglu_limit_tensor)
+
+    def chunk_gated_delta_rule_fwd(self, *args, **kwargs):
+        """Preserve vLLM's seven-value low-level GDN prefill contract."""
+        from flaggems_vllm import chunk_gated_delta_rule_fwd
+
+        return chunk_gated_delta_rule_fwd(*args, **kwargs)
+
+    def fused_recurrent_gated_delta_rule_fwd(self, *args, **kwargs):
+        """MTP recurrent path, including accepted-token/page indices.
+
+        Current MetaX kernels consume vLLM's V-major cache directly, including
+        a padded leading page stride. No full-cache or active-page copy is needed.
+        """
+        from flaggems_vllm import fused_recurrent_gated_delta_rule_fwd
+
+        if not getattr(self, "_gdn_recurrent_reported", False):
+            import logging
+            logging.getLogger(__name__).info(
+                "FlagOS GDN recurrent: impl=default.flagos kernel=%s.%s",
+                fused_recurrent_gated_delta_rule_fwd.__module__,
+                fused_recurrent_gated_delta_rule_fwd.__name__,
+            )
+            self._gdn_recurrent_reported = True
+
+        return fused_recurrent_gated_delta_rule_fwd(*args, **kwargs)
+
+    def gdn_packed_decode(
+        self, mixed_qkv, a, b, A_log, dt_bias, scale, initial_state, out,
+        ssm_state_indices, use_qk_l2norm_in_kernel=False,
+    ):
+        """Non-MTP decode: fused QKV/gates/recurrent update into vLLM's buffers."""
+        from flaggems_vllm import fused_recurrent_gated_delta_rule_packed_decode
+
+        if not getattr(self, "_gdn_packed_reported", False):
+            import logging
+            logging.getLogger(__name__).info(
+                "FlagOS GDN packed: impl=default.flagos kernel=%s.%s",
+                fused_recurrent_gated_delta_rule_packed_decode.__module__,
+                fused_recurrent_gated_delta_rule_packed_decode.__name__,
+            )
+            self._gdn_packed_reported = True
+
+        return fused_recurrent_gated_delta_rule_packed_decode(
+            mixed_qkv=mixed_qkv, a=a, b=b, A_log=A_log, dt_bias=dt_bias,
+            scale=scale, initial_state=initial_state, out=out,
+            ssm_state_indices=ssm_state_indices,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        )
+
+    def gdn_prefill(
+        self, q, k, v, g, beta, scale=None, initial_state=None,
+        output_final_state=False, cu_seqlens=None, chunk_indices=None,
+        chunk_offsets=None, use_qk_l2norm_in_kernel=False,
+    ):
+        """Adapt the vLLM GDN prefill contract to FlagGems-vLLM."""
+        if use_qk_l2norm_in_kernel:
+            raise NotImplementedError(
+                "FlagOS GDN prefill requires Q/K normalization before dispatch"
+            )
+        if scale is None:
+            scale = k.shape[-1] ** -0.5
+        from flaggems_vllm import vendor_name, chunk_gated_delta_rule_fwd
+        if not getattr(self, "_gdn_prefill_reported", False):
+            import logging
+            logging.getLogger(__name__).info(
+                "FlagOS GDN prefill: impl=default.flagos kernel=%s.%s layout=%s",
+                chunk_gated_delta_rule_fwd.__module__,
+                chunk_gated_delta_rule_fwd.__name__,
+                "V-major" if vendor_name == "metax" else "K-major",
+            )
+            self._gdn_prefill_reported = True
+
+        # MetaX's runtime export already consumes vLLM's [N, H, V, K]
+        # layout. Only the generic K-major implementation needs conversion.
+        transpose_state = vendor_name != "metax"
+        chunk_state = (
+            initial_state.transpose(-1, -2).contiguous()
+            if transpose_state and initial_state is not None else initial_state
+        )
+        _, out, _, final_state, _, _, _ = self.chunk_gated_delta_rule_fwd(
+            q=q, k=k, v=v, g=g, beta=beta, scale=scale,
+            initial_state=chunk_state,
+            output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens, chunk_indices=chunk_indices,
+            chunk_offsets=chunk_offsets,
+        )
+        if transpose_state and final_state is not None:
+            final_state = final_state.transpose(-1, -2).contiguous()
+        return out.to(q.dtype), final_state
+
+    def gdn_decode(
+        self, A_log, a, b, dt_bias, q, k, v, beta=1.0,
+        threshold=20.0, scale=None, initial_state=None,
+        inplace_final_state=True, cu_seqlens=None, ssm_state_indices=None,
+        num_accepted_tokens=None, use_qk_l2norm_in_kernel=False,
+        is_kda=False,
+    ):
+        """Adapt vLLM's fused-sigmoid GDN call to FlagGems-vLLM."""
+        if is_kda:
+            raise NotImplementedError("FlagOS GDN recurrent does not cover KDA")
+        if scale is None:
+            scale = k.shape[-1] ** -0.5
+        gate = -A_log.float().exp() * F.softplus(
+            a.float() + dt_bias.float(), beta=beta, threshold=threshold
+        )
+        beta_gate = b.float().sigmoid()
+        return self.fused_recurrent_gated_delta_rule_fwd(
+            q=q, k=k, v=v, g=gate, beta=beta_gate, scale=scale,
+            initial_state=initial_state,
+            inplace_final_state=inplace_final_state,
+            cu_seqlens=cu_seqlens,
+            ssm_state_indices=ssm_state_indices,
+            num_accepted_tokens=num_accepted_tokens,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        )
 
     def rms_norm(
         self,

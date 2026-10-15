@@ -4,7 +4,7 @@
 FlagGems backend operator registrations.
 
 This module registers all DEFAULT (FlagGems) implementations.
-Only impls for which use_flaggems_op(op_name) is True are passed to the registry.
+All impls follow use_flaggems_op(op_name), including the high-level GDN ops.
 """
 
 from __future__ import annotations
@@ -37,6 +37,17 @@ def _has_flaggems_op(op_name: str):
         except ImportError:
             return False
 
+    return is_available
+
+
+def _has_flaggems_vllm_op(op_name: str):
+    """Expose optional device kernels only when the runtime exports them."""
+    def is_available() -> bool:
+        try:
+            import flaggems_vllm
+            return callable(getattr(flaggems_vllm, op_name, None))
+        except ImportError:
+            return False
     return is_available
 
 
@@ -131,6 +142,27 @@ def register_builtins(registry) -> None:
             fn=_bind_is_available(backend.attention_backend, is_avail),
             vendor=None,
             priority=BackendPriority.DEFAULT,
+        ),
+        OpImpl(
+            op_name="gdn_prefill", impl_id="default.flagos",
+            kind=BackendImplKind.DEFAULT,
+            fn=_bind_is_available(backend.gdn_prefill, is_avail),
+            vendor=None, priority=BackendPriority.DEFAULT,
+        ),
+        OpImpl(
+            op_name="gdn_decode", impl_id="default.flagos",
+            kind=BackendImplKind.DEFAULT,
+            fn=_bind_is_available(backend.gdn_decode, is_avail),
+            vendor=None, priority=BackendPriority.DEFAULT,
+        ),
+        OpImpl(
+            op_name="gdn_packed_decode", impl_id="default.flagos",
+            kind=BackendImplKind.DEFAULT,
+            fn=_bind_is_available(
+                backend.gdn_packed_decode,
+                _has_flaggems_vllm_op("fused_recurrent_gated_delta_rule_packed_decode"),
+            ),
+            vendor=None, priority=BackendPriority.DEFAULT,
         ),
         # fused topk bias
         OpImpl(

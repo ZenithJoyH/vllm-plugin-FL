@@ -37,6 +37,19 @@ def register_builtins(registry) -> None:
     is_avail = backend.is_available
 
     impls = [
+        # GDN: preserve the original vLLM/FLA call path as a vendor candidate.
+        OpImpl(
+            op_name="gdn_prefill", impl_id="vendor.metax",
+            kind=BackendImplKind.VENDOR,
+            fn=_bind_is_available(backend.gdn_prefill, is_avail),
+            vendor="metax", priority=BackendPriority.VENDOR,
+        ),
+        OpImpl(
+            op_name="gdn_decode", impl_id="vendor.metax",
+            kind=BackendImplKind.VENDOR,
+            fn=_bind_is_available(backend.gdn_decode, is_avail),
+            vendor="metax", priority=BackendPriority.VENDOR,
+        ),
         # Activation
         OpImpl(
             op_name="silu_and_mul",

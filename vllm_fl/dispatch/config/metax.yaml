@@ -40,8 +40,10 @@ strict: false
 #   - vendor        : Any available vendor backend (auto-detected)
 #   - vendor:metax   : METAX-specific vendor backend
 op_backends:
-  # attention_backend: prioritize vendor (MACA attention)
+  # Prefer FlagOS; the backend's attention switch chooses FlagGems-vLLM
+  # or Triton attention. MACA remains a dispatch fallback.
   attention_backend:
+    - flagos
     - vendor:metax
   # All other ops: prefer FlagGems (Triton), fallback to reference (PyTorch native)
   silu_and_mul:
@@ -59,10 +61,6 @@ op_backends:
 
 # FlagOS operator blacklist
 flagos_blacklist:
-  - masked_fill
-  - masked_fill_
 
 # OOT (Out-of-Tree) operator blacklist
 oot_blacklist:
-  - masked_fill
-  - masked_fill_

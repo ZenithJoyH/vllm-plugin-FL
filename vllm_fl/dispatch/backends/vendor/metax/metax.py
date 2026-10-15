@@ -62,6 +62,20 @@ class MacaBackend(Backend):
 
     # ==================== Operator Implementations ====================
 
+    def gdn_prefill(self, *args, **kwargs):
+        """Call the original vLLM/FLA GDN prefill path unchanged."""
+        from vllm.model_executor.layers.fla.ops import chunk_gated_delta_rule
+
+        return chunk_gated_delta_rule(*args, **kwargs)
+
+    def gdn_decode(self, *args, **kwargs):
+        """Call the original vLLM/FLA fused-sigmoid decode path."""
+        from vllm.model_executor.layers.fla.ops import (
+            fused_sigmoid_gating_delta_rule_update,
+        )
+
+        return fused_sigmoid_gating_delta_rule_update(*args, **kwargs)
+
     def silu_and_mul(self, obj, x: torch.Tensor) -> torch.Tensor:
         """
         SiLU activation followed by element-wise multiplication.
