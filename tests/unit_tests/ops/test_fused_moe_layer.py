@@ -219,6 +219,30 @@ def test_true_grouped_sigmoid_keeps_grouped_dispatch(monkeypatch):
     reason="T-Head PPU is not available",
 )
 class TestTheadMoERouting:
+    @pytest.fixture(autouse=True)
+    def flaggems_dispatch(self, monkeypatch):
+        import vllm_fl.dispatch as dispatch
+        from vllm_fl.dispatch.manager import OpManager
+        from vllm_fl.dispatch.policy import SelectionPolicy, policy_context
+
+        # Exercise the optional library explicitly, with a fresh cache and
+        # strict selection so a native fallback cannot pass this kernel test.
+        monkeypatch.setenv("VLLM_FL_USE_FLAGGEMS_VLLM", "1")
+        monkeypatch.setenv("USE_FLAGGEMS", "1")
+        monkeypatch.setenv("VLLM_FL_FLAGOS_WHITELIST", "topk_sigmoid")
+        manager = OpManager()
+        monkeypatch.setattr(dispatch, "_CACHED_OPS", [])
+        monkeypatch.setattr(dispatch, "get_default_manager", lambda: manager)
+        monkeypatch.setattr(
+            router_module, "_topk_sigmoid", dispatch.CachedOp("topk_sigmoid")
+        )
+        policy = SelectionPolicy.from_dict(
+            strict=True, per_op_order={"topk_sigmoid": ["flagos"]}
+        )
+        with policy_context(policy):
+            assert manager._resolve_impl("topk_sigmoid").impl_id == "default.flagos"
+            yield
+
     def test_sigmoid_bias_matches_reference(self):
         torch.manual_seed(21)
         hidden_states = torch.randn(17, 64, device="cuda", dtype=torch.bfloat16)

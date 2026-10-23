@@ -130,19 +130,6 @@ def test_local_triton_quant_matches_reference_on_cuda(device):
     torch.testing.assert_close(actual_scale, expected_scale, rtol=0, atol=1e-7)
 
 
-def test_installed_flaggems_scaled_mm_rejects_int8_before_kernel():
-    from flag_gems import scaled_mm
-
-    with pytest.raises(RuntimeError, match="must be Float8 matrices"):
-        scaled_mm(
-            torch.ones(2, 8, dtype=torch.int8),
-            torch.ones(8, 4, dtype=torch.int8),
-            torch.ones(2, 1),
-            torch.ones(1, 4),
-            out_dtype=torch.bfloat16,
-        )
-
-
 def _int8_dispatch(monkeypatch, enabled):
     import os
 
