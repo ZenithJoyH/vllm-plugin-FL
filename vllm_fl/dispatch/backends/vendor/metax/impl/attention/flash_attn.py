@@ -804,6 +804,8 @@ class FlashAttentionImpl(AttentionImpl):
                         device=attn_metadata.prefill_seq_lens.device,
                         dtype=torch.int32,
                     ).cumsum(dim=0, dtype=torch.int32)
+                    prefill_key, prefill_value = key_cache, value_cache
+                    prefill_block_table = attn_metadata.prefill_block_table
                     if (
                         attn_type == AttentionType.DECODER
                         and attn_metadata.num_prefills == 1
@@ -814,21 +816,24 @@ class FlashAttentionImpl(AttentionImpl):
                         seq_len = prefill_seq_lens[0]
                         block_size = key_cache.shape[1]
                         num_blocks = (seq_len + block_size - 1) // block_size
-                        block_ids = attn_metadata.prefill_block_table[0, :num_blocks]
-                        key = torch.index_select(key_cache, 0, block_ids).reshape(
+                        block_ids = prefill_block_table[0, :num_blocks]
+                        prefill_key = torch.index_select(key_cache, 0, block_ids).reshape(
                             -1, key_cache.shape[2], key_cache.shape[3]
                         )[:seq_len]
-                        value = torch.index_select(value_cache, 0, block_ids).reshape(
+                        prefill_value = torch.index_select(value_cache, 0, block_ids).reshape(
                             -1, value_cache.shape[2], value_cache.shape[3]
                         )[:seq_len]
+                        prefill_block_table = None
                         logger.info_once(
                             "Using contiguous KV for single-request prefill "
                             "FlashAttention."
                         )
-                        prefill_output = flash_attn_varlen_func(
+                    output[num_decode_tokens:num_actual_tokens] = (
+                        flash_attn_varlen_func(
                             q=query[num_decode_tokens:num_actual_tokens],
-                            k=key,
-                            v=value,
+                            k=prefill_key,
+                            v=prefill_value,
+                            block_table=prefill_block_table,
                             cu_seqlens_q=attn_metadata.prefill_query_start_loc,
                             cu_seqlens_k=cu_prefix_kv_lens,
                             max_seqlen_q=attn_metadata.max_query_len,
@@ -840,24 +845,7 @@ class FlashAttentionImpl(AttentionImpl):
                             softcap=self.logits_soft_cap,
                             s_aux=self.sinks,
                         )
-                    else:
-                        prefill_output = flash_attn_varlen_func(
-                            q=query[num_decode_tokens:num_actual_tokens],
-                            k=key_cache,
-                            v=value_cache,
-                            block_table=attn_metadata.prefill_block_table,
-                            cu_seqlens_q=attn_metadata.prefill_query_start_loc,
-                            cu_seqlens_k=cu_prefix_kv_lens,
-                            max_seqlen_q=attn_metadata.max_query_len,
-                            max_seqlen_k=attn_metadata.prefill_max_seq_len,
-                            softmax_scale=self.scale,
-                            causal=attn_metadata.causal,
-                            window_size=self.sliding_window,
-                            alibi_slopes=self.alibi_slopes,
-                            softcap=self.logits_soft_cap,
-                            s_aux=self.sinks,
-                        )
-                    output[num_decode_tokens:num_actual_tokens] = prefill_output
+                    )
                 if attn_metadata.num_decodes > 0:
                     # Use flash_attn_with_kvcache for normal decoding.
                     decode_query = query[:num_decode_tokens]
